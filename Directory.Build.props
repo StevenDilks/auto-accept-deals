@@ -1,0 +1,6 @@
+<Project>
+  <PropertyGroup>
+    <Schedule1Path Condition="'$(Schedule1Path)' == '' AND '$(SCHEDULE1_PATH)' != ''">$(SCHEDULE1_PATH)</Schedule1Path>
+    <Schedule1Path Condition="'$(Schedule1Path)' == ''">C:\Program Files (x86)\Steam\steamapps\common\Schedule I</Schedule1Path>
+  </PropertyGroup>
+</Project>

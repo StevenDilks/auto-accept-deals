@@ -1,0 +1,21 @@
+# Build output
+bin/
+obj/
+
+# IDE
+.vs/
+.idea/
+*.user
+*.suo
+*.csproj.user
+*.DotSettings.user
+
+# Local overrides
+Directory.Build.user.props
+
+# Claude Code local settings
+.claude/
+
+# OS
+[Tt]humbs.db
+.DS_Store
