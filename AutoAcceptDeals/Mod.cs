@@ -19,6 +19,7 @@ public class Mod : MelonMod
 
     public override void OnInitializeMelon()
     {
+        Settings.Load();
         LoggerInstance.Msg("AutoAcceptDeals loaded — enabled. Press O in-game to toggle.");
     }
 
