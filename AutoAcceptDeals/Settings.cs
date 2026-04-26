@@ -14,6 +14,9 @@ internal enum TimeMode { Fixed, Randomize, WaitForPlayer }
 
 internal sealed record DiscoveredLocation(string Name, string Guid);
 
+/// <summary>
+/// Static, single-threaded settings store. All members must be called from the Unity main thread.
+/// </summary>
 internal static class Settings
 {
     private const int CurrentSchemaVersion = 1;
@@ -24,6 +27,7 @@ internal static class Settings
     private static readonly Dictionary<EMapRegion, string?> _regionLocations = new();
     private static readonly Dictionary<EMapRegion, IReadOnlyList<DiscoveredLocation>> _discoveredLocations = new();
     private static bool _persistEnabled = true;
+    private static bool _suppressionWarned;
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -48,6 +52,7 @@ internal static class Settings
     {
         ApplyDefaults();
         _persistEnabled = true;
+        _suppressionWarned = false;
 
         var path = SettingsPath;
 
@@ -93,6 +98,9 @@ internal static class Settings
                 return;
             }
 
+            bool schemaVersionPresent = root.TryGetProperty("schemaVersion", out var svEl)
+                                        && svEl.ValueKind == JsonValueKind.Number
+                                        && svEl.TryGetInt32(out _);
             int schemaVersion = TryGetInt(root, "schemaVersion") ?? 0;
             if (schemaVersion > CurrentSchemaVersion)
             {
@@ -100,6 +108,12 @@ internal static class Settings
                 MelonLogger.Warning(
                     $"Settings file at {path} has schemaVersion {schemaVersion}, newer than supported {CurrentSchemaVersion}; using defaults (file left untouched).");
                 return;
+            }
+
+            if (!schemaVersionPresent && root.EnumerateObject().Any(p => p.Name != "schemaVersion"))
+            {
+                MelonLogger.Warning(
+                    $"Settings file at {path} has no schemaVersion; assuming legacy and upgrading to v{CurrentSchemaVersion}.");
             }
 
             needsRewrite = ApplyFromJson(root);
@@ -154,6 +168,7 @@ internal static class Settings
         TryPersist();
     }
 
+    // lo > hi is permitted by design — Phase 7 interprets it as an overnight wrap (e.g. 22:00..02:00).
     public static void SetRandomizeBounds(int lo, int hi)
     {
         if (lo < 0 || lo >= MinutesPerDay)
@@ -317,10 +332,16 @@ internal static class Settings
     private static bool TryReadEnum<TEnum>(JsonElement root, string name, Action<TEnum> apply) where TEnum : struct, Enum
     {
         if (!root.TryGetProperty(name, out var el)) return false;
-        if (el.ValueKind == JsonValueKind.String && Enum.TryParse<TEnum>(el.GetString(), ignoreCase: false, out var v))
+        if (el.ValueKind == JsonValueKind.String)
         {
-            apply(v);
-            return true;
+            var s = el.GetString();
+            // Reject numeric strings — Enum.TryParse would happily turn "1" into the enum at ordinal 1.
+            if (s != null && Array.IndexOf(Enum.GetNames(typeof(TEnum)), s) >= 0
+                          && Enum.TryParse<TEnum>(s, ignoreCase: false, out var v))
+            {
+                apply(v);
+                return true;
+            }
         }
         var observed = el.ValueKind == JsonValueKind.String ? $"'{el.GetString()}'" : el.ValueKind.ToString();
         MelonLogger.Warning($"Settings: {name} value {observed} is not a known {typeof(TEnum).Name}; using default.");
@@ -345,7 +366,16 @@ internal static class Settings
 
     private static bool TryPersist()
     {
-        if (!_persistEnabled) return false;
+        if (!_persistEnabled)
+        {
+            if (!_suppressionWarned)
+            {
+                MelonLogger.Warning(
+                    $"Settings changed in memory but writes are disabled because the file at {SettingsPath} could not be parsed at startup. Fix or delete the file and restart to re-enable persistence.");
+                _suppressionWarned = true;
+            }
+            return false;
+        }
         try
         {
             SaveInternal();
@@ -388,8 +418,20 @@ internal static class Settings
 
         var tmp = path + ".tmp";
         var json = JsonSerializer.Serialize(dto, JsonOptions);
-        File.WriteAllText(tmp, json);
-        File.Move(tmp, path, overwrite: true);
+        try
+        {
+            File.WriteAllText(tmp, json);
+            File.Move(tmp, path, overwrite: true);
+        }
+        finally
+        {
+            // File.Move clears tmp on success; this only fires if Move threw.
+            if (File.Exists(tmp))
+            {
+                try { File.Delete(tmp); }
+                catch { /* best-effort cleanup */ }
+            }
+        }
     }
 
     private sealed class SettingsDto
