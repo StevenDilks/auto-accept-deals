@@ -26,17 +26,12 @@ public class Mod : MelonMod
     {
         if (sceneName == MainSceneName)
         {
-            if (ModState.InGameScene) return;
-            ModState.InGameScene = true;
-            if (ModState.Enabled)
-            {
-                LoggerInstance.Msg("Entered game scene; mod active.");
-            }
+            if (!ModState.EnterScene()) return;
+            LoggerInstance.Msg($"Entered game scene; mod {(ModState.Enabled ? "active" : "disabled")}.");
         }
         else if (sceneName == MenuSceneName || sceneName == TutorialSceneName)
         {
-            if (!ModState.InGameScene) return;
-            ModState.InGameScene = false;
+            if (!ModState.LeaveScene()) return;
             LoggerInstance.Msg("Left game scene; mod paused.");
         }
     }
