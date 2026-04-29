@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
+using Il2CppScheduleOne.Economy;
 using Il2CppScheduleOne.Map;
 using MelonLoader;
 using MelonLoader.Utils;
@@ -22,7 +23,6 @@ internal static class Settings
     private const int CurrentSchemaVersion = 1;
     private const string SettingsFolderName = "AutoAcceptDeals";
     private const string SettingsFileName = "settings.json";
-    private const int MinutesPerDay = 1440;
 
     private static readonly Dictionary<EMapRegion, string?> _regionLocations = new();
     private static readonly Dictionary<EMapRegion, IReadOnlyList<DiscoveredLocation>> _discoveredLocations = new();
@@ -40,9 +40,7 @@ internal static class Settings
     public static string? GlobalLocationGuid { get; private set; }
     public static IReadOnlyDictionary<EMapRegion, string?> RegionLocations => _regionLocations;
     public static TimeMode TimeMode { get; private set; }
-    public static int FixedTime { get; private set; }
-    public static int RandomizeStart { get; private set; }
-    public static int RandomizeEnd { get; private set; }
+    public static EDealWindow FixedWindow { get; private set; }
     public static IReadOnlyDictionary<EMapRegion, IReadOnlyList<DiscoveredLocation>> DiscoveredLocations => _discoveredLocations;
 
     private static string SettingsPath =>
@@ -159,25 +157,10 @@ internal static class Settings
         TryPersist();
     }
 
-    public static void SetFixedTime(int minutes)
+    public static void SetFixedWindow(EDealWindow w)
     {
-        if (minutes < 0 || minutes >= MinutesPerDay)
-            throw new ArgumentOutOfRangeException(nameof(minutes), $"FixedTime must be in [0..{MinutesPerDay - 1}].");
-        if (FixedTime == minutes) return;
-        FixedTime = minutes;
-        TryPersist();
-    }
-
-    // lo > hi is permitted by design — Phase 7 interprets it as an overnight wrap (e.g. 22:00..02:00).
-    public static void SetRandomizeBounds(int lo, int hi)
-    {
-        if (lo < 0 || lo >= MinutesPerDay)
-            throw new ArgumentOutOfRangeException(nameof(lo), $"RandomizeStart must be in [0..{MinutesPerDay - 1}].");
-        if (hi < 0 || hi >= MinutesPerDay)
-            throw new ArgumentOutOfRangeException(nameof(hi), $"RandomizeEnd must be in [0..{MinutesPerDay - 1}].");
-        if (RandomizeStart == lo && RandomizeEnd == hi) return;
-        RandomizeStart = lo;
-        RandomizeEnd = hi;
+        if (FixedWindow == w) return;
+        FixedWindow = w;
         TryPersist();
     }
 
@@ -193,9 +176,7 @@ internal static class Settings
         LocationMode = LocationMode.Global;
         GlobalLocationGuid = null;
         TimeMode = TimeMode.WaitForPlayer;
-        FixedTime = 720;
-        RandomizeStart = 480;
-        RandomizeEnd = 1080;
+        FixedWindow = EDealWindow.Morning;
 
         _regionLocations.Clear();
         _discoveredLocations.Clear();
@@ -223,16 +204,7 @@ internal static class Settings
         if (!TryReadEnum<TimeMode>(root, "timeMode", v => TimeMode = v))
             needsRewrite = true;
 
-        if (!TryReadInt(root, "fixedTime", v => v >= 0 && v < MinutesPerDay, v => FixedTime = v,
-                $"fixedTime must be in [0..{MinutesPerDay - 1}]"))
-            needsRewrite = true;
-
-        if (!TryReadInt(root, "randomizeStart", v => v >= 0 && v < MinutesPerDay, v => RandomizeStart = v,
-                $"randomizeStart must be in [0..{MinutesPerDay - 1}]"))
-            needsRewrite = true;
-
-        if (!TryReadInt(root, "randomizeEnd", v => v >= 0 && v < MinutesPerDay, v => RandomizeEnd = v,
-                $"randomizeEnd must be in [0..{MinutesPerDay - 1}]"))
+        if (!TryReadEnum<EDealWindow>(root, "fixedWindow", v => FixedWindow = v))
             needsRewrite = true;
 
         if (root.TryGetProperty("regionLocations", out var rlEl))
@@ -397,9 +369,7 @@ internal static class Settings
             LocationMode = LocationMode.ToString(),
             GlobalLocationGuid = GlobalLocationGuid,
             TimeMode = TimeMode.ToString(),
-            FixedTime = FixedTime,
-            RandomizeStart = RandomizeStart,
-            RandomizeEnd = RandomizeEnd,
+            FixedWindow = FixedWindow.ToString(),
         };
 
         foreach (var region in Enum.GetValues<EMapRegion>())
@@ -442,9 +412,7 @@ internal static class Settings
         public string? GlobalLocationGuid { get; set; }
         public Dictionary<string, string?> RegionLocations { get; set; } = new();
         public string TimeMode { get; set; } = "";
-        public int FixedTime { get; set; }
-        public int RandomizeStart { get; set; }
-        public int RandomizeEnd { get; set; }
+        public string FixedWindow { get; set; } = "";
         public Dictionary<string, List<DiscoveredLocationDto>> DiscoveredLocations { get; set; } = new();
     }
 
