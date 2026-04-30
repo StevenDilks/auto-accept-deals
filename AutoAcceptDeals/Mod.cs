@@ -21,6 +21,7 @@ public class Mod : MelonMod
     public override void OnInitializeMelon()
     {
         Settings.Load();
+        HarmonyInstance.PatchAll(typeof(Mod).Assembly);
         LoggerInstance.Msg("AutoAcceptDeals loaded — enabled. Press O in-game to toggle, F8 to open settings.");
     }
 
@@ -34,6 +35,7 @@ public class Mod : MelonMod
         else if (sceneName == MenuSceneName || sceneName == TutorialSceneName)
         {
             SettingsPanel.ForceClose();
+            DealListener.OnSceneLeave();
             if (!ModState.LeaveScene()) return;
             LoggerInstance.Msg("Left game scene; mod paused.");
         }
