@@ -34,6 +34,10 @@
       <HintPath>$(Schedule1Path)\MelonLoader\Il2CppAssemblies\UnityEngine.UI.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <Reference Include="UnityEngine.IMGUIModule">
+      <HintPath>$(Schedule1Path)\MelonLoader\Il2CppAssemblies\UnityEngine.IMGUIModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
     <Reference Include="Unity.TextMeshPro">
       <HintPath>$(Schedule1Path)\MelonLoader\Il2CppAssemblies\Unity.TextMeshPro.dll</HintPath>
       <Private>false</Private>

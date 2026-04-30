@@ -16,11 +16,12 @@ public class Mod : MelonMod
     private const string TutorialSceneName = "Tutorial";
 
     private const KeyCode ToggleKey = KeyCode.O;
+    private const KeyCode PanelKey = KeyCode.F8;
 
     public override void OnInitializeMelon()
     {
         Settings.Load();
-        LoggerInstance.Msg("AutoAcceptDeals loaded — enabled. Press O in-game to toggle.");
+        LoggerInstance.Msg("AutoAcceptDeals loaded — enabled. Press O in-game to toggle, F8 to open settings.");
     }
 
     public override void OnSceneWasInitialized(int buildIndex, string sceneName)
@@ -32,6 +33,7 @@ public class Mod : MelonMod
         }
         else if (sceneName == MenuSceneName || sceneName == TutorialSceneName)
         {
+            SettingsPanel.ForceClose();
             if (!ModState.LeaveScene()) return;
             LoggerInstance.Msg("Left game scene; mod paused.");
         }
@@ -42,11 +44,24 @@ public class Mod : MelonMod
         if (!ModState.InGameScene) return;
         if (IsTextInputFocused()) return;
 
+        if (Input.GetKeyDown(PanelKey))
+        {
+            SettingsPanel.Toggle();
+            return;
+        }
+
+        if (SettingsPanel.IsOpen) return;
+
         if (Input.GetKeyDown(ToggleKey))
         {
             ModState.Toggle();
             LoggerInstance.Msg($"AutoAcceptDeals toggled: {(ModState.Enabled ? "ON" : "OFF")}");
         }
+    }
+
+    public override void OnGUI()
+    {
+        SettingsPanel.Draw();
     }
 
     private static bool IsTextInputFocused()
