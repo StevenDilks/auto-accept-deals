@@ -20,14 +20,23 @@ internal static class SettingsPanel
 {
     private const string UIElementName = "AutoAcceptDeals.SettingsPanel";
 
+    private static readonly EMapRegion[] _regions = Enum.GetValues<EMapRegion>();
+
     public static bool IsOpen { get; private set; }
 
     private static Rect _windowRect = new(40f, 40f, 480f, 600f);
     private static Vector2 _scroll;
 
-    private static bool _savedCanLook = true;
-    private static bool _savedCanMove = true;
-    private static bool _savedEquippingEnabled = true;
+    private static bool _suppressedCamera;
+    private static bool _suppressedMovement;
+    private static bool _suppressedInventory;
+    private static bool _savedCanLook;
+    private static bool _savedCanMove;
+    private static bool _savedEquippingEnabled;
+
+    // Set by the × button or other in-layout close paths; consumed in Draw() *after* GUILayout.EndArea
+    // so we don't tear down a Begin/End pair mid-Repaint. OnGUI fires for both Layout and Repaint events
+    // on the same click, so this flag is set twice — idempotent, the second pass no-ops.
     private static bool _pendingClose;
 
     public static void Toggle()
@@ -46,18 +55,21 @@ internal static class SettingsPanel
             cam.AddActiveUIElement(UIElementName);
             cam.SetCanLook(false);
             cam.FreeMouse();
+            _suppressedCamera = true;
         }
         var move = GetMovement();
         if (move != null)
         {
             _savedCanMove = move.CanMove;
             move.CanMove = false;
+            _suppressedMovement = true;
         }
         var inv = GetInventory();
         if (inv != null)
         {
             _savedEquippingEnabled = inv.EquippingEnabled;
             inv.SetEquippingEnabled(false);
+            _suppressedInventory = true;
         }
         IsOpen = true;
     }
@@ -65,17 +77,29 @@ internal static class SettingsPanel
     public static void Close()
     {
         if (!IsOpen) return;
-        var cam = GetCamera();
-        if (cam != null)
+        if (_suppressedCamera)
         {
-            cam.RemoveActiveUIElement(UIElementName);
-            cam.SetCanLook(_savedCanLook);
-            if (_savedCanLook) cam.LockMouse();
+            var cam = GetCamera();
+            if (cam != null)
+            {
+                cam.RemoveActiveUIElement(UIElementName);
+                cam.SetCanLook(_savedCanLook);
+                if (_savedCanLook) cam.LockMouse();
+            }
+            _suppressedCamera = false;
         }
-        var move = GetMovement();
-        if (move != null) move.CanMove = _savedCanMove;
-        var inv = GetInventory();
-        if (inv != null) inv.SetEquippingEnabled(_savedEquippingEnabled);
+        if (_suppressedMovement)
+        {
+            var move = GetMovement();
+            if (move != null) move.CanMove = _savedCanMove;
+            _suppressedMovement = false;
+        }
+        if (_suppressedInventory)
+        {
+            var inv = GetInventory();
+            if (inv != null) inv.SetEquippingEnabled(_savedEquippingEnabled);
+            _suppressedInventory = false;
+        }
         IsOpen = false;
     }
 
@@ -110,10 +134,31 @@ internal static class SettingsPanel
         DrawBody();
         GUILayout.EndArea();
 
+        // Without GUILayout.Window we have to claim mouse events manually so clicks/scrolls
+        // on the panel don't reach world-space UI sitting behind it. Buttons inside the panel
+        // already consume their own events; this catches the gaps (the box background, scrollview
+        // gutter, label rows, drags, scrolls).
+        ConsumeMouseEventsInRect(_windowRect);
+
         if (_pendingClose)
         {
             _pendingClose = false;
             Close();
+        }
+    }
+
+    private static void ConsumeMouseEventsInRect(Rect r)
+    {
+        var ev = Event.current;
+        if (ev == null) return;
+        switch (ev.type)
+        {
+            case EventType.MouseDown:
+            case EventType.MouseUp:
+            case EventType.MouseDrag:
+            case EventType.ScrollWheel:
+                if (r.Contains(ev.mousePosition)) ev.Use();
+                break;
         }
     }
 
@@ -222,7 +267,7 @@ internal static class SettingsPanel
         GUILayout.EndHorizontal();
 
         bool anyDiscovered = false;
-        foreach (var region in Enum.GetValues<EMapRegion>())
+        foreach (var region in _regions)
         {
             var locs = LocationsFor(region);
             if (locs.Count == 0) continue;
@@ -242,7 +287,7 @@ internal static class SettingsPanel
 
     private static void DrawPerRegionLocationLists()
     {
-        foreach (var region in Enum.GetValues<EMapRegion>())
+        foreach (var region in _regions)
         {
             Settings.RegionLocations.TryGetValue(region, out var selectedGuid);
             var locs = LocationsFor(region);

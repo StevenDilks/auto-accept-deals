@@ -207,6 +207,8 @@ internal static class Settings
         if (!TryReadEnum<EDealWindow>(root, "fixedWindow", v => FixedWindow = v))
             needsRewrite = true;
 
+        WarnAndDropLegacyKeys(root, ref needsRewrite);
+
         if (root.TryGetProperty("regionLocations", out var rlEl))
         {
             if (rlEl.ValueKind == JsonValueKind.Object)
@@ -318,6 +320,24 @@ internal static class Settings
         var observed = el.ValueKind == JsonValueKind.String ? $"'{el.GetString()}'" : el.ValueKind.ToString();
         MelonLogger.Warning($"Settings: {name} value {observed} is not a known {typeof(TEnum).Name}; using default.");
         return false;
+    }
+
+    // Phase 4 renamed `fixedTime` (int minutes) → `fixedWindow` (EDealWindow string) and dropped
+    // `randomizeStart` / `randomizeEnd` (Randomize now picks one of four windows uniformly per deal,
+    // no settings). Surface a one-time per-load warning so the silent rewrite is visible in the log
+    // instead of hiding behind a routine validation rewrite.
+    private static readonly string[] LegacyKeys = { "fixedTime", "randomizeStart", "randomizeEnd" };
+
+    private static void WarnAndDropLegacyKeys(JsonElement root, ref bool needsRewrite)
+    {
+        foreach (var key in LegacyKeys)
+        {
+            if (root.TryGetProperty(key, out _))
+            {
+                MelonLogger.Warning($"Settings: legacy key '{key}' present; dropping on next write (Phase 4 changed time settings).");
+                needsRewrite = true;
+            }
+        }
     }
 
     private static bool TryReadNullableString(JsonElement root, string name, Action<string?> apply)
