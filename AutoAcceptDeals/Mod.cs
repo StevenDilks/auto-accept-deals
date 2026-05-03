@@ -21,6 +21,7 @@ public class Mod : MelonMod
     public override void OnInitializeMelon()
     {
         Settings.Load();
+        HarmonyInstance.PatchAll(typeof(Mod).Assembly);
         LoggerInstance.Msg("AutoAcceptDeals loaded — enabled. Press O in-game to toggle, F8 to open settings.");
     }
 
@@ -34,6 +35,7 @@ public class Mod : MelonMod
         else if (sceneName == MenuSceneName || sceneName == TutorialSceneName)
         {
             SettingsPanel.ForceClose();
+            DealListener.OnSceneLeave();
             if (!ModState.LeaveScene()) return;
             LoggerInstance.Msg("Left game scene; mod paused.");
         }
@@ -42,20 +44,31 @@ public class Mod : MelonMod
     public override void OnUpdate()
     {
         if (!ModState.InGameScene) return;
-        if (IsTextInputFocused()) return;
 
-        if (Input.GetKeyDown(PanelKey))
+        // Intermittent freeze observed on O-toggle; if a log line appears here the cause is
+        // managed. If the freeze recurs with no log entry, the cause is native-side (likely
+        // a UI hotkey conflict or EventSystem stall) — capture a mono_dump and inspect.
+        try
         {
-            SettingsPanel.Toggle();
-            return;
+            if (IsTextInputFocused()) return;
+
+            if (Input.GetKeyDown(PanelKey))
+            {
+                SettingsPanel.Toggle();
+                return;
+            }
+
+            if (SettingsPanel.IsOpen) return;
+
+            if (Input.GetKeyDown(ToggleKey))
+            {
+                ModState.Toggle();
+                LoggerInstance.Msg($"AutoAcceptDeals toggled: {(ModState.Enabled ? "ON" : "OFF")}");
+            }
         }
-
-        if (SettingsPanel.IsOpen) return;
-
-        if (Input.GetKeyDown(ToggleKey))
+        catch (System.Exception ex)
         {
-            ModState.Toggle();
-            LoggerInstance.Msg($"AutoAcceptDeals toggled: {(ModState.Enabled ? "ON" : "OFF")}");
+            LoggerInstance.Error($"AAD: OnUpdate input handling threw: {ex}");
         }
     }
 
