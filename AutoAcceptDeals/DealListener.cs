@@ -36,12 +36,28 @@ internal static class OfferContractPatch
 internal static class DealListener
 {
     private static bool _discoveredThisSession;
+    private static IntPtr _lastCustomerPtr;
+    private static IntPtr _lastInfoPtr;
+    private static float _lastHandledTime;
+    private const float DuplicateWindowSeconds = 0.5f;
 
     public static void HandleOffer(Customer customer, ContractInfo info)
     {
         if (!ModState.ShouldRun) return;
         if (customer == null || info == null) return;
         if (info.IsCounterOffer) return;
+
+        var custPtr = customer.Pointer;
+        var infoPtr = info.Pointer;
+        var now = Time.realtimeSinceStartup;
+        if (custPtr == _lastCustomerPtr && infoPtr == _lastInfoPtr &&
+            now - _lastHandledTime < DuplicateWindowSeconds)
+        {
+            return;
+        }
+        _lastCustomerPtr = custPtr;
+        _lastInfoPtr = infoPtr;
+        _lastHandledTime = now;
 
         EnsureDiscovered();
 
@@ -133,13 +149,17 @@ internal static class DealListener
             if (regionData == null) continue;
             var region = regionData.Region;
             var found = new List<DiscoveredLocation>();
+            var seenGuids = new HashSet<string>();
             var locs = regionData.RegionDeliveryLocations;
             if (locs != null)
             {
                 foreach (var loc in locs)
                 {
                     if (loc == null) continue;
-                    found.Add(new DiscoveredLocation(loc.LocationName ?? "", loc.StaticGUID ?? ""));
+                    var guid = loc.StaticGUID ?? "";
+                    if (string.IsNullOrEmpty(guid)) continue;
+                    if (!seenGuids.Add(guid)) continue;
+                    found.Add(new DiscoveredLocation(loc.LocationName ?? "", guid));
                 }
             }
 
@@ -158,8 +178,13 @@ internal static class DealListener
     {
         if (!Settings.DiscoveredLocations.TryGetValue(region, out var cached) || cached.Count == 0) return;
 
-        var cachedByGuid = cached.ToDictionary(l => l.Guid, l => l.Name);
-        var foundByGuid  = found.ToDictionary(l => l.Guid, l => l.Name);
+        var cachedByGuid = cached
+            .Where(l => !string.IsNullOrEmpty(l.Guid))
+            .GroupBy(l => l.Guid)
+            .ToDictionary(g => g.Key, g => g.First().Name);
+        var foundByGuid = found
+            .GroupBy(l => l.Guid)
+            .ToDictionary(g => g.Key, g => g.First().Name);
 
         foreach (var (guid, name) in foundByGuid)
             if (!cachedByGuid.ContainsKey(guid))

@@ -164,6 +164,10 @@ internal static class SettingsPanel
 
     private static void DrawBody()
     {
+        _wrapMaxRowWidth = Mathf.Max(
+            80f,
+            _windowRect.width - WrapInnerPadding - WrapScrollbarWidth - WrapIndent - WrapSafetyMargin);
+
         GUILayout.BeginHorizontal();
         GUILayout.Label($"Mod: {(ModState.Enabled ? "ON" : "OFF")}    (toggle with O)");
         GUILayout.FlexibleSpace();
@@ -273,12 +277,13 @@ internal static class SettingsPanel
             if (locs.Count == 0) continue;
             anyDiscovered = true;
             GUILayout.Label($"  -- {region} --");
-            GUILayout.BeginHorizontal();
-            GUILayout.Space(20f);
-            foreach (var loc in locs)
-                DrawLocationButton(loc, loc.Guid == selectedGuid, () => Settings.SetGlobalLocationGuid(loc.Guid));
-            GUILayout.FlexibleSpace();
-            GUILayout.EndHorizontal();
+            DrawWrappedButtons(locs.Select(loc =>
+            {
+                var captured = loc;
+                var label = captured.Guid == selectedGuid ? $"● {captured.Name}" : captured.Name;
+                Action click = () => Settings.SetGlobalLocationGuid(captured.Guid);
+                return (label, click);
+            }));
         }
 
         if (!anyDiscovered)
@@ -294,31 +299,77 @@ internal static class SettingsPanel
             var selectedName = locs.FirstOrDefault(l => l.Guid == selectedGuid)?.Name ?? "(None)";
 
             GUILayout.Label($"  {region}: {selectedName}");
-            GUILayout.BeginHorizontal();
-            GUILayout.Space(20f);
-            if (GUILayout.Button("(None)", GUILayout.ExpandWidth(false)))
-            {
-                if (selectedGuid != null) Settings.SetRegionLocation(region, null);
-            }
+
             if (locs.Count == 0)
             {
+                GUILayout.BeginHorizontal();
+                GUILayout.Space(20f);
+                if (GUILayout.Button("(None)", GUILayout.ExpandWidth(false)))
+                {
+                    if (selectedGuid != null) Settings.SetRegionLocation(region, null);
+                }
                 DrawDiscoveryHint("(no locations discovered yet)");
+                GUILayout.FlexibleSpace();
+                GUILayout.EndHorizontal();
+                continue;
             }
-            else
+
+            var buttons = new List<(string, Action)>
             {
-                foreach (var loc in locs)
-                    DrawLocationButton(loc, loc.Guid == selectedGuid, () => Settings.SetRegionLocation(region, loc.Guid));
+                ("(None)", () => { if (selectedGuid != null) Settings.SetRegionLocation(region, null); })
+            };
+            foreach (var loc in locs)
+            {
+                var captured = loc;
+                var label = captured.Guid == selectedGuid ? $"● {captured.Name}" : captured.Name;
+                buttons.Add((label, () => Settings.SetRegionLocation(region, captured.Guid)));
             }
-            GUILayout.FlexibleSpace();
-            GUILayout.EndHorizontal();
+            DrawWrappedButtons(buttons);
         }
     }
 
-    private static void DrawLocationButton(DiscoveredLocation loc, bool selected, Action onClick)
+    private const float WrapButtonSpacing = 4f;
+    private const float WrapIndent = 20f;
+    private const float WrapInnerPadding = 16f;       // BeginArea horizontal padding (8 each side)
+    private const float WrapScrollbarWidth = 16f;     // IMGUI vertical scrollbar reservation
+    private const float WrapSafetyMargin = 8f;        // keep the last button off the scrollbar
+
+    // Recomputed each frame in DrawBody so the wrap adapts if _windowRect.width changes.
+    private static float _wrapMaxRowWidth = 0f;
+
+    private static void DrawWrappedButtons(IEnumerable<(string label, Action onClick)> buttons)
     {
-        var label = selected ? $"● {loc.Name}" : loc.Name;
-        if (GUILayout.Button(label, GUILayout.ExpandWidth(false)))
-            onClick();
+        var style = GUI.skin.button;
+        float used = 0f;
+        bool rowOpen = false;
+        foreach (var (label, onClick) in buttons)
+        {
+            var content = new GUIContent(label);
+            var w = style.CalcSize(content).x + WrapButtonSpacing;
+            if (!rowOpen)
+            {
+                GUILayout.BeginHorizontal();
+                GUILayout.Space(WrapIndent);
+                rowOpen = true;
+                used = 0f;
+            }
+            else if (used + w > _wrapMaxRowWidth)
+            {
+                GUILayout.FlexibleSpace();
+                GUILayout.EndHorizontal();
+                GUILayout.BeginHorizontal();
+                GUILayout.Space(WrapIndent);
+                used = 0f;
+            }
+            if (GUILayout.Button(content, GUILayout.ExpandWidth(false)))
+                onClick();
+            used += w;
+        }
+        if (rowOpen)
+        {
+            GUILayout.FlexibleSpace();
+            GUILayout.EndHorizontal();
+        }
     }
 
     private static void DrawFixedTimeRow()
