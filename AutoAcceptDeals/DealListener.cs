@@ -19,7 +19,7 @@ internal sealed record DealRequest(
     ProductDefinition? Product,
     EQuality Quality,
     int Quantity,
-    EMapRegion Region,
+    EMapRegion? Region,
     float Payment);
 
 [HarmonyPatch(typeof(Customer), nameof(Customer.OfferContract))]
@@ -50,7 +50,8 @@ internal static class DealListener
         var custPtr = customer.Pointer;
         var infoPtr = info.Pointer;
         var now = Time.realtimeSinceStartup;
-        if (custPtr == _lastCustomerPtr && infoPtr == _lastInfoPtr &&
+        if (_lastCustomerPtr != IntPtr.Zero && _lastInfoPtr != IntPtr.Zero &&
+            custPtr == _lastCustomerPtr && infoPtr == _lastInfoPtr &&
             now - _lastHandledTime < DuplicateWindowSeconds)
         {
             return;
@@ -63,7 +64,7 @@ internal static class DealListener
 
         if (!TryExtractFirstProduct(info, out var productId, out var product, out var quality, out var quantity))
         {
-            MelonLogger.Warning("AAD: ContractInfo had no product entries; skipping.");
+            MelonLogger.Warning("AAD: ContractInfo had no usable product entry; skipping.");
             return;
         }
 
@@ -76,9 +77,12 @@ internal static class DealListener
 
     private static void ProcessRequest(DealRequest r)
     {
-        var name = r.Customer?.NPC?.fullName ?? "<unknown>";
+        // Phase 7: when SendCounteroffer adds throttling, share state with this log emission
+        // (or move the log downstream of the throttle) so a misbehaving offer source can't flood.
+        var name = r.Customer.NPC?.fullName ?? "<unknown>";
+        var region = r.Region.HasValue ? r.Region.Value.ToString() : "<unresolved>";
         MelonLogger.Msg(
-            $"AAD: deal request — customer={name}, product={r.ProductId}×{r.Quantity} ({r.Quality}), region={r.Region}, payment={r.Payment}");
+            $"AAD: deal request — customer={name}, product={r.ProductId}×{r.Quantity} ({r.Quality}), region={region}, payment={r.Payment}");
     }
 
     private static bool TryExtractFirstProduct(
@@ -102,24 +106,24 @@ internal static class DealListener
         if (entry == null) return false;
 
         productId = entry.ProductID ?? "";
+        if (string.IsNullOrEmpty(productId)) return false;
+
         quality = entry.Quality;
         quantity = entry.Quantity;
-
-        if (!string.IsNullOrEmpty(productId))
-            product = Registry.GetItem(productId)?.TryCast<ProductDefinition>();
+        product = Registry.GetItem(productId)?.TryCast<ProductDefinition>();
 
         return true;
     }
 
-    private static EMapRegion ResolveRegion(Customer customer)
+    private static EMapRegion? ResolveRegion(Customer customer)
     {
-        if (!Map.InstanceExists) return default;
+        if (!Map.InstanceExists) return null;
 
         var npc = customer.NPC;
         var transform = npc != null ? npc.transform : null;
-        var pos = transform != null ? transform.position : Vector3.zero;
+        if (transform == null) return null;
 
-        return Map.instance.GetRegionFromPosition(pos);
+        return Map.instance.GetRegionFromPosition(transform.position);
     }
 
     private static void EnsureDiscovered()
@@ -139,8 +143,6 @@ internal static class DealListener
             MelonLogger.Warning("AAD: Map.instance.Regions was null; deferring discovery to next deal.");
             return;
         }
-
-        _discoveredThisSession = true;
 
         int total = 0;
         var lines = new List<string>();
@@ -169,6 +171,8 @@ internal static class DealListener
             lines.Add($"  {region}: {found.Count} location(s) — " +
                       string.Join(", ", found.Select(l => $"{l.Name} ({l.Guid})")));
         }
+
+        _discoveredThisSession = true;
 
         MelonLogger.Msg($"AAD: discovery walk — {regions.Count} region(s), {total} location(s).");
         foreach (var line in lines) MelonLogger.Msg(line);

@@ -164,9 +164,11 @@ internal static class SettingsPanel
 
     private static void DrawBody()
     {
+        var scrollbarWidth = GUI.skin?.verticalScrollbar?.fixedWidth ?? 0f;
+        if (scrollbarWidth <= 0f) scrollbarWidth = WrapScrollbarWidthFallback;
         _wrapMaxRowWidth = Mathf.Max(
             80f,
-            _windowRect.width - WrapInnerPadding - WrapScrollbarWidth - WrapIndent - WrapSafetyMargin);
+            _windowRect.width - WrapInnerPadding - scrollbarWidth - WrapIndent - WrapSafetyMargin);
 
         GUILayout.BeginHorizontal();
         GUILayout.Label($"Mod: {(ModState.Enabled ? "ON" : "OFF")}    (toggle with O)");
@@ -331,7 +333,7 @@ internal static class SettingsPanel
     private const float WrapButtonSpacing = 4f;
     private const float WrapIndent = 20f;
     private const float WrapInnerPadding = 16f;       // BeginArea horizontal padding (8 each side)
-    private const float WrapScrollbarWidth = 16f;     // IMGUI vertical scrollbar reservation
+    private const float WrapScrollbarWidthFallback = 16f; // used only if GUI.skin.verticalScrollbar is unavailable
     private const float WrapSafetyMargin = 8f;        // keep the last button off the scrollbar
 
     // Recomputed each frame in DrawBody so the wrap adapts if _windowRect.width changes.
