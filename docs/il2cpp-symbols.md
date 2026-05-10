@@ -62,26 +62,37 @@ Same applies if any later phase needs `Assembly-CSharp-firstpass.dll`.
 
 ---
 
-## 1. Deal-acceptance probability function — *Phase 6*
+## 1. Deal-acceptance oracle — *Phase 6*
 
-The clean callable: **`ScheduleOne.Economy.Customer.GetOfferSuccessChance(List<ItemInstance> items, float askingPrice) -> float`** (instance, public). Returns the customer's probability of accepting an offer with the given basket and asking price. Phase 6's pricing search calls this with candidate `(items, price)` pairs and finds the highest `askingPrice` that still returns `1.0f`.
+**Use `Customer.EvaluateCounteroffer(ProductDefinition product, int quantity, float totalPrice) -> bool`** (protected virtual; exposed `public` by Il2CppInterop). This is what `ProcessCounterOfferServerSide` calls server-side to decide accept vs. reject for a real counter-offer, so its yes/no is the signal that matches what the live send path will obey. Phase 6 binary-searches integer **total** dollars on this; ~17 iterations to converge over a typical $1k → $20k range.
 
-The companion boolean evaluator: **`ScheduleOne.Economy.Customer.EvaluateCounteroffer(ProductDefinition product, int quantity, float price) -> bool`** (protected virtual; exposed `public` by Il2CppInterop). This is what `ProcessCounterOfferServerSide` calls server-side to decide accept vs. reject for a real counter-offer. Phase 6 should *not* depend on this for the search (it returns a hard yes/no, not a probability), but should use it to verify the chosen `(quantity, price)` would in fact be accepted before sending.
+| Field | Value |
+| --- | --- |
+| Cpp2IL form | `ScheduleOne.Economy.Customer.EvaluateCounteroffer(ProductDefinition, int, float) -> bool` |
+| Il2CppInterop form | same args, `public unsafe virtual` |
+| Source (Cpp2IL) | `aad-decomp/Assembly-CSharp/ScheduleOne/Economy/Customer.cs:917` |
 
-Auxiliary, less useful: `Customer.GetValueProposition(ProductDefinition product, float price) -> float` (static) — value/price ratio score; an input to `GetOfferSuccessChance`, not a substitute.
+**Empirically confirmed Phase 6 (units probe, 2026-05-04):**
+
+- `price` is **total dollars, not per-unit.** Confirmed via the engine's units-disambiguation probe: for greencrack qty=25, customer-offered $1290 total, `EvaluateCounteroffer(greencrack, 25, 1)` returns `true` (customer happily accepts a near-free deal), `EvaluateCounteroffer(greencrack, 25, 1290)` returns `true`, `EvaluateCounteroffer(greencrack, 25, 100000)` returns `false`. The True/True/False pattern uniquely identifies total-dollar semantics. Earlier per-unit reading was wrong — a single-point test ($52 accepts) was consistent with both interpretations and we picked the wrong one.
+- Phase 7's `SendCounteroffer.price` parameter is **strongly indicated to be total** as well, since `EvaluateCounteroffer` is what its server-side handler invokes — but verify before shipping.
+- **Non-deterministic.** Three identical calls `EvaluateCounteroffer(greencrack, 25, X)` for converging X returned different best-accept thresholds: 1606, 1643, 1736. ~8% spread. The function rolls internally — likely consults `Customer.OfferSuccessChance` or equivalent. Binary search assumes monotonicity which breaks under randomness; convergence drifts run-to-run. Phase 6 ships best-effort; Phase 7 will need sample-N-take-min, a safety margin, or a deterministic alternative.
+- Each call is one server-side roll; the symbols-map note about "per-roll" RNG advance still applies. Bisecting at most 32 integer prices per deal hasn't shown adverse effects in play.
+
+### Rejected alternative: `Customer.GetOfferSuccessChance(List<ItemInstance>, float) -> float`
+
+Listed in earlier drafts of this doc as the primary oracle. **Empirically broken or stale** — investigated and rejected during Phase 6:
+
+- Returns `0.0` deterministically regardless of basket construction. Tested with both `new ProductItemInstance(product, qty, quality, null)` and the proper factory `product.GetDefaultInstance(qty)` + `SetQuality(quality)` (which yields a `WeedInstance` / `MethInstance` / etc. with default packaging from `ProductDefinition.ValidPackaging[0]`). Same zero result. `EvaluateCounteroffer` returned `true` on the same `(product, qty, perUnitPrice)` inputs, so the basket isn't the problem — the function is.
+- **Zero callers in the entire decompiled `Assembly-CSharp`.** No game code invokes it. Strongly suggests it's stale/dead developer API and not the engine's true acceptance oracle.
+- The auxiliary `Customer.GetValueProposition(ProductDefinition, price) -> float` (static, line 924) is documented as feeding into this function and is similarly suspect — bodies are empty in Cpp2IL, no callers, untested.
+
+If a future phase needs a **probability** rather than a boolean (e.g., to surface "85% likely to accept" in the UI), it would have to either implement chance estimation by repeated `EvaluateCounteroffer` calls under varied RNG state, or reverse the function from the disassembled native binary. Don't trust `GetOfferSuccessChance` without re-verifying it against `EvaluateCounteroffer` first.
 
 | Field | Value |
 | --- | --- |
 | Cpp2IL form | `ScheduleOne.Economy.Customer.GetOfferSuccessChance(List<ItemInstance>, float) -> float` |
-| Il2CppInterop form | `Il2CppScheduleOne.Economy.Customer.GetOfferSuccessChance(Il2CppSystem.Collections.Generic.List<ItemInstance>, float) -> float` |
 | Source (Cpp2IL) | `aad-decomp/Assembly-CSharp/ScheduleOne/Economy/Customer.cs:1105` |
-| Source (Interop) | `aad-decomp/Interop/Il2CppScheduleOne/Economy/Customer.cs:4340` (method-token registration) |
-
-**Caveats — flag for Phase 6:**
-
-- Cpp2IL output has empty bodies for all IL2CPP methods, so the *math* inside `GetOfferSuccessChance` cannot be read off the decompile. We treat it as a black box and call it. Constants visible on `Customer` that hint at its inputs: `AFFINITY_MAX_EFFECT = 0.3f`, `PROPERTY_MAX_EFFECT = 0.4f`, `QUALITY_MAX_EFFECT = 0.3f`, `MIN_ORDER_APPEAL = 0.05f`, `RELATIONSHIP_THRESHOLD_TO_GIVE_DEAL_TO_CARTEL = 0.25f`.
-- Determinism is not yet known. Phase 6 should call `GetOfferSuccessChance` with the same inputs twice and check return-value equality before relying on it for a binary search. If it samples RNG internally, the search must average over multiple calls or fall back to `EvaluateCounteroffer`-based bisection.
-- The function takes `List<ItemInstance>`, not `ProductDefinition` — Phase 6 must construct a list of concrete item instances (presumably matching the customer's requested product + quality) to call it. Quality affects acceptance.
 
 ---
 
@@ -302,8 +313,8 @@ Morning, Afternoon, Night, LateNight
 | `Customer.NotifyPlayerOfContract` | (protected virtual) | `public unsafe virtual` | 5 |
 | `Customer.SendCounteroffer` | (protected virtual) | `public unsafe virtual` | 7 |
 | `Customer.ProcessCounterOfferServerSide` | (private, ServerRpc) | `public unsafe` | 7 (reference only) |
-| `Customer.EvaluateCounteroffer` | (protected virtual) | `public unsafe virtual` | 6 (verification) |
-| `Customer.GetOfferSuccessChance` | (instance, public) | same | 6 |
+| `Customer.EvaluateCounteroffer` | (protected virtual) | `public unsafe virtual` | 6 (acceptance oracle — TOTAL price; non-deterministic) |
+| `Customer.GetOfferSuccessChance` | (instance, public) | same | 6 (rejected — empirically broken / dead API; see §1) |
 | `Customer.OfferedContractInfo` / `OfferedContractTime` / `CurrentContract` / `DefaultDeliveryLocation` / `NPC` | properties on `Customer` | same, public unsafe getters | 5, 7 |
 | `ContractInfo` | `ScheduleOne.Quests` | `Il2CppScheduleOne.Quests` | 5, 6, 7 |
 | `Contract` | `ScheduleOne.Quests` | `Il2CppScheduleOne.Quests` | 7 |
@@ -319,7 +330,7 @@ Morning, Afternoon, Night, LateNight
 
 These don't block any Phase, but Phase 6 / 7 should resolve them at the start of their work:
 
-1. **Determinism of `GetOfferSuccessChance`.** Is the return value pure for a given `(items, askingPrice)`, or does it sample RNG? Phase 6 must call it twice with identical inputs and compare before designing the price search.
+1. ~~**Determinism of `GetOfferSuccessChance`.**~~ Resolved Phase 6: function is pure but always returns 0 for our baskets and has no in-game callers. Engine uses `Customer.EvaluateCounteroffer` instead. See §1.
 2. **Location and time on counter-offers.** `SendCounteroffer` does not accept location/time. Verify experimentally whether the resulting `Contract` inherits the customer's defaults vs. the original offer's values, then decide between modifying `Contract` post-acceptance and patching `ProcessCounterOfferServerSide`.
 3. **Multiplayer-as-client.** `OfferContract` runs server-side. In a multiplayer session where the local player is a client (not host), confirm whether the patch fires at all and whether `SendCounteroffer` from a client correctly round-trips through the server.
 4. **EDealWindow vs. minute-precision time.** `PlayerAcceptedContract(EDealWindow)` suggests window granularity is what the game really cares about. Phase 7 should confirm whether finer-grained `WindowStartTime` on `Contract.DeliveryWindow` is honored.

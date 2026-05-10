@@ -1,6 +1,8 @@
-Microsoft Visual Studio Solution File, Format Version 12.00
+﻿Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio Version 17
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AutoAcceptDeals", "AutoAcceptDeals\AutoAcceptDeals.csproj", "{8E2D9F5A-1B3C-4D6E-9A7F-2C5E8B1A4D9E}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AutoAcceptDeals.Tests", "AutoAcceptDeals.Tests\AutoAcceptDeals.Tests.csproj", "{DBAFA256-844E-46FF-8ACE-375F052A41DC}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -12,6 +14,10 @@ Global
 		{8E2D9F5A-1B3C-4D6E-9A7F-2C5E8B1A4D9E}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{8E2D9F5A-1B3C-4D6E-9A7F-2C5E8B1A4D9E}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{8E2D9F5A-1B3C-4D6E-9A7F-2C5E8B1A4D9E}.Release|Any CPU.Build.0 = Release|Any CPU
+		{DBAFA256-844E-46FF-8ACE-375F052A41DC}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{DBAFA256-844E-46FF-8ACE-375F052A41DC}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{DBAFA256-844E-46FF-8ACE-375F052A41DC}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{DBAFA256-844E-46FF-8ACE-375F052A41DC}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
