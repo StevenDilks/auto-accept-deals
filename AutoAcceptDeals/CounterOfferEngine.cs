@@ -118,8 +118,8 @@ internal static class CounterOfferEngine
         if (best >= 0) return (best, "evaluator");
 
         // Customer rejected every integer in [Ceiling(floor), ceiling]. Shouldn't happen in practice
-        // (a total ≥ the customer's own offer should accept), but guard so we ship the floor unchanged
-        // and let TryPropose's fallback-floor restore the customer's exact offer.
+        // (a total ≥ the customer's own offer should accept), but ship the floor unchanged so the
+        // proposal logs the customer's exact offer rather than a junk value.
         MelonLogger.Warning(
             $"AAD: engine — EvaluateCounteroffer rejected every probe in [{floorInt}, {ceiling}] for {product.ID}; using floor unchanged.");
         return (floor, "evaluator-no-accept");

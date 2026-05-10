@@ -13,13 +13,9 @@ public class QuantityMathTests
     public void RoundUpToMultiple_Passthrough_WhenMultipleIsZero(int v, int multiple, int expected)
         => Assert.Equal(expected, QuantityMath.RoundUpToMultiple(v, multiple));
 
-    [Theory]
-    [InlineData(0, 5, 0)]   // zero input, positive multiple
-    public void RoundUpToMultiple_ZeroInput(int v, int multiple, int expected)
-        => Assert.Equal(expected, QuantityMath.RoundUpToMultiple(v, multiple));
-
     // Step 7: RoundingMultiple > 0  →  rounds up to next multiple
     [Theory]
+    [InlineData(0, 5, 0)]     // zero input — already a multiple of 5
     [InlineData(25, 5, 25)]   // already a multiple
     [InlineData(30, 5, 30)]
     [InlineData(26, 5, 30)]   // rounds up
