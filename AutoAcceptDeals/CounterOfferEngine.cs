@@ -19,8 +19,8 @@ internal static class CounterOfferEngine
     private const int MinAbsoluteCeiling = 5_000; // total-dollar headroom for the search (caps tiny-offer ranges)
     private const int MaxBisectIterations = 32;
 
-    // One-shot units-disambiguation probe (Phase 6 verification). Resets on scene-leave so a
-    // fresh save/load runs it again. Remove once we've locked the EvaluateCounteroffer.price units.
+    // TODO(Phase 7): remove _unitsProbed, RunUnitsProbeOnce, and OnSceneLeave once SendCounteroffer
+    //   is shipped and total-dollar semantics are locked in. OnSceneLeave becomes a no-op without these.
     private static bool _unitsProbed;
 
     public static void OnSceneLeave()
@@ -63,14 +63,6 @@ internal static class CounterOfferEngine
 
         var (total, strategy) = SearchByEvaluator(r.Customer, r.Product, effectiveQty, r.Payment);
 
-        if (total < r.Payment)
-        {
-            MelonLogger.Warning(
-                $"AAD: engine — search returned total={total:F0} below customer offer {r.Payment:F0}; falling back to floor.");
-            total = r.Payment;
-            strategy = "fallback-floor";
-        }
-
         float unit = total / Math.Max(1, effectiveQty);
         proposal = new CounterProposal(
             r.Product, effectiveQty, unit, total, strategy, r.Quantity);
@@ -104,7 +96,8 @@ internal static class CounterOfferEngine
     private static (float total, string strategy) SearchByEvaluator(
         Customer customer, ProductDefinition product, int qty, float floor)
     {
-        var ceiling = (int)Math.Min(int.MaxValue, Math.Max(floor * 16f, floor + MinAbsoluteCeiling));
+        long rawCeiling = (long)Math.Max((double)floor * 16.0, (double)floor + MinAbsoluteCeiling);
+        int ceiling = (int)Math.Min(int.MaxValue - 1, rawCeiling);
         int floorInt = (int)Math.Ceiling(floor);
         int lo = floorInt;
         int hi = ceiling;
@@ -122,7 +115,7 @@ internal static class CounterOfferEngine
             }
             if (accepted) { best = mid; lo = mid + 1; } else hi = mid - 1;
         }
-        if (best > 0) return (best, "evaluator");
+        if (best >= 0) return (best, "evaluator");
 
         // Customer rejected every integer in [Ceiling(floor), ceiling]. Shouldn't happen in practice
         // (a total ≥ the customer's own offer should accept), but guard so we ship the floor unchanged
