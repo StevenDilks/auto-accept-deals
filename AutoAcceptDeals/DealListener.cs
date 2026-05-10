@@ -73,7 +73,11 @@ internal static class DealListener
         ProcessRequest(request);
     }
 
-    public static void OnSceneLeave() => _discoveredThisSession = false;
+    public static void OnSceneLeave()
+    {
+        _discoveredThisSession = false;
+        CounterOfferEngine.OnSceneLeave();
+    }
 
     private static void ProcessRequest(DealRequest r)
     {
@@ -83,6 +87,13 @@ internal static class DealListener
         var region = r.Region.HasValue ? r.Region.Value.ToString() : "<unresolved>";
         MelonLogger.Msg(
             $"AAD: deal request — customer={name}, product={r.ProductId}×{r.Quantity} ({r.Quality}), region={region}, payment={r.Payment}");
+
+        if (!CounterOfferEngine.TryPropose(r, out var p)) return;
+
+        MelonLogger.Msg(
+            $"AAD: proposal — customer={name}, product={r.ProductId}×{p.Quantity} (orig={p.OriginalQuantity}, {r.Quality}), " +
+            $"unit={p.UnitPrice:F2}, total={p.TotalPrice:F0} (orig payment={r.Payment:F0}, +{p.TotalPrice - r.Payment:F0}), " +
+            $"strategy={p.Strategy}.");
     }
 
     private static bool TryExtractFirstProduct(
