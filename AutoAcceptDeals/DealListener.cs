@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using HarmonyLib;
@@ -22,6 +23,12 @@ internal sealed record DealRequest(
     EMapRegion? Region,
     float Payment);
 
+internal sealed record PendingSend(
+    string? LocationGuid,
+    EDealWindow? Window,
+    TimeMode TimeModeSnapshot,
+    Customer Customer);
+
 [HarmonyPatch(typeof(Customer), nameof(Customer.OfferContract))]
 internal static class OfferContractPatch
 {
@@ -41,11 +48,20 @@ internal static class DealListener
     private static float _lastHandledTime;
     private const float DuplicateWindowSeconds = 0.5f;
 
+    private static readonly PendingSendRegistry<PendingSend> _registry = new();
+
     public static void HandleOffer(Customer customer, ContractInfo info)
     {
         if (!ModState.ShouldRun) return;
         if (customer == null || info == null) return;
-        if (info.IsCounterOffer) return;
+
+        // Counter-offer round-trip: the game calls OfferContract synchronously inside
+        // SendCounteroffer with IsCounterOffer=false, so detect via registry presence instead.
+        if (info.IsCounterOffer || _registry.HasPending(customer.Pointer))
+        {
+            HandleCounterOfferAccepted(customer, info);
+            return;
+        }
 
         var custPtr = customer.Pointer;
         var infoPtr = info.Pointer;
@@ -76,13 +92,11 @@ internal static class DealListener
     public static void OnSceneLeave()
     {
         _discoveredThisSession = false;
-        CounterOfferEngine.OnSceneLeave();
+        _registry.Clear();
     }
 
     private static void ProcessRequest(DealRequest r)
     {
-        // Phase 7: when SendCounteroffer adds throttling, share state with this log emission
-        // (or move the log downstream of the throttle) so a misbehaving offer source can't flood.
         var name = r.Customer.NPC?.fullName ?? "<unknown>";
         var region = r.Region.HasValue ? r.Region.Value.ToString() : "<unresolved>";
         MelonLogger.Msg(
@@ -94,6 +108,142 @@ internal static class DealListener
             $"AAD: proposal — customer={name}, product={r.ProductId}×{p.Quantity} (orig={p.OriginalQuantity}, {r.Quality}), " +
             $"unit={p.UnitPrice:F2}, total={p.TotalPrice:F0} (orig payment={r.Payment:F0}, +{p.TotalPrice - r.Payment:F0}), " +
             $"strategy={p.Strategy}.");
+
+        SendCounterOffer(r, p);
+    }
+
+    private static void SendCounterOffer(DealRequest r, CounterProposal p)
+    {
+        var customer = r.Customer;
+        var name = customer.NPC?.fullName ?? "<unknown>";
+
+        // Resolve location GUID at send time; snapshot so a settings change mid-flight can't corrupt the contract.
+        string? locationGuid = Settings.LocationMode == LocationMode.Global
+            ? Settings.GlobalLocationGuid
+            : (r.Region.HasValue && Settings.RegionLocations.TryGetValue(r.Region.Value, out var g) ? g : null);
+
+        if (Settings.LocationMode == LocationMode.Global && locationGuid == null)
+            MelonLogger.Warning($"AAD: SendCounterOffer — Global location unset for {name}; leaving customer default.");
+        else if (Settings.LocationMode == LocationMode.PerRegion && locationGuid == null)
+            MelonLogger.Warning(
+                $"AAD: SendCounterOffer — PerRegion location unset for {(r.Region.HasValue ? r.Region.Value.ToString() : "<unresolved>")}; leaving customer default.");
+
+        EDealWindow? window = Settings.TimeMode switch
+        {
+            TimeMode.Fixed     => Settings.FixedWindow,
+            TimeMode.Randomize => PickRandomWindow(),
+            _                  => null,
+        };
+
+        var pending = new PendingSend(locationGuid, window, Settings.TimeMode, customer);
+        _registry.Register(customer.Pointer, pending);
+
+        // SendCounteroffer.price is total dollars — same semantics as EvaluateCounteroffer (confirmed Phase 6).
+        customer.SendCounteroffer(p.Product, p.Quantity, p.TotalPrice);
+
+        MelonLogger.Msg(
+            $"AAD: SendCounteroffer dispatched — customer={name}, product={r.ProductId}×{p.Quantity}, " +
+            $"total={p.TotalPrice:F0}, mode={Settings.TimeMode}, location-set={locationGuid != null}.");
+    }
+
+    // Called when OfferContract fires with IsCounterOffer=true — the customer accepted our counter
+    // Called when OfferContract fires and the registry has a pending entry for this customer —
+    // the game calls OfferContract synchronously inside SendCounteroffer (IsCounterOffer=false).
+    private static void HandleCounterOfferAccepted(Customer customer, ContractInfo info)
+    {
+        try
+        {
+            var pending = _registry.TakeForKey(customer.Pointer);
+            if (pending == null) return; // not from our send path
+
+            var name = customer.NPC?.fullName ?? "<unknown>";
+
+            // Apply location to ContractInfo synchronously (before OfferContract returns).
+            if (!string.IsNullOrEmpty(pending.LocationGuid))
+            {
+                var loc = TryFindLocationByGuid(pending.LocationGuid);
+                if (loc != null)
+                    info.DeliveryLocationGUID = loc.StaticGUID;
+                else
+                    MelonLogger.Warning(
+                        $"AAD: HandleCounterOfferAccepted — GUID '{pending.LocationGuid}' not found in map; leaving customer default.");
+            }
+
+            // Apply window times to ContractInfo synchronously.
+            if (pending.TimeModeSnapshot != TimeMode.WaitForPlayer && pending.Window.HasValue)
+            {
+                var wi = DealWindowInfo.GetWindowInfo(pending.Window.Value);
+                var wc = info.DeliveryWindow;
+                if (wc != null)
+                {
+                    wc.IsEnabled = true;
+                    wc.WindowStartTime = wi.StartTime;
+                    wc.WindowEndTime = wi.EndTime;
+                }
+
+                // PlayerAcceptedContract must be deferred — calling it synchronously inside
+                // OfferContract's call stack throws NullReferenceException in game code.
+                MelonCoroutines.Start(AcceptAfterDelay(customer, pending.Window.Value, pending.LocationGuid));
+            }
+
+            var locStr = !string.IsNullOrEmpty(pending.LocationGuid) ? pending.LocationGuid : "default";
+            var winStr = pending.Window.HasValue ? pending.Window.Value.ToString() : "WaitForPlayer";
+            MelonLogger.Msg($"AAD: contract accepted — customer={name}, location={locStr}, window={winStr}.");
+        }
+        catch (Exception ex)
+        {
+            MelonLogger.Error($"AAD: HandleCounterOfferAccepted threw: {ex}");
+        }
+    }
+
+    private static IEnumerator AcceptAfterDelay(Customer customer, EDealWindow window, string? locationGuid)
+    {
+        // PlayerAcceptedContract needs ~6-10 frames after OfferContract returns for the game
+        // to finish setting up its deal-scheduling state (observed in-game: succeeds by frame 10).
+        for (int attempt = 0; attempt < 20; attempt++)
+        {
+            yield return null;
+            try
+            {
+                customer.PlayerAcceptedContract(window);
+                if (!string.IsNullOrEmpty(locationGuid))
+                {
+                    var contract = customer.CurrentContract;
+                    var loc = TryFindLocationByGuid(locationGuid);
+                    if (contract != null && loc != null)
+                        contract.DeliveryLocation = loc;
+                }
+                yield break;
+            }
+            catch (Exception)
+            {
+                // game not ready yet — retry next frame
+            }
+        }
+        MelonLogger.Error($"AAD: PlayerAcceptedContract still failing after 20 frames for {customer.NPC?.fullName ?? "?"}; giving up.");
+    }
+
+    private static EDealWindow PickRandomWindow()
+    {
+        return UnityEngine.Random.Range(0, 4) switch
+        {
+            0 => EDealWindow.Morning,
+            1 => EDealWindow.Afternoon,
+            2 => EDealWindow.Night,
+            _ => EDealWindow.LateNight,
+        };
+    }
+
+    private static DeliveryLocation? TryFindLocationByGuid(string? guid)
+    {
+        if (string.IsNullOrEmpty(guid) || !Map.InstanceExists) return null;
+        foreach (var rd in Map.instance.Regions)
+        {
+            if (rd?.RegionDeliveryLocations == null) continue;
+            foreach (var loc in rd.RegionDeliveryLocations)
+                if (loc != null && loc.StaticGUID == guid) return loc;
+        }
+        return null;
     }
 
     private static bool TryExtractFirstProduct(

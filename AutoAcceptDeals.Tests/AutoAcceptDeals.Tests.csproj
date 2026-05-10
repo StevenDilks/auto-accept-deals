@@ -17,6 +17,8 @@
 
   <ItemGroup>
     <Compile Include="../AutoAcceptDeals/QuantityMath.cs" Link="QuantityMath.cs" />
+    <Compile Include="../AutoAcceptDeals/ProbabilityFormula.cs" Link="ProbabilityFormula.cs" />
+    <Compile Include="../AutoAcceptDeals/PendingSendRegistry.cs" Link="PendingSendRegistry.cs" />
   </ItemGroup>
 
 </Project>
