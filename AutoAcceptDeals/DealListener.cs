@@ -147,7 +147,6 @@ internal static class DealListener
             $"total={p.TotalPrice:F0}, mode={Settings.TimeMode}, location-set={locationGuid != null}.");
     }
 
-    // Called when OfferContract fires with IsCounterOffer=true — the customer accepted our counter
     // Called when OfferContract fires and the registry has a pending entry for this customer —
     // the game calls OfferContract synchronously inside SendCounteroffer (IsCounterOffer=false).
     private static void HandleCounterOfferAccepted(Customer customer, ContractInfo info)
@@ -176,9 +175,16 @@ internal static class DealListener
                 MelonCoroutines.Start(AcceptAfterDelay(customer, pending.Window.Value, pending.LocationGuid));
             }
 
-            var locStr = !string.IsNullOrEmpty(pending.LocationGuid) ? pending.LocationGuid : "default";
-            var winStr = pending.Window.HasValue ? pending.Window.Value.ToString() : "WaitForPlayer";
-            MelonLogger.Msg($"AAD: contract accepted — customer={name}, location={locStr}, window={winStr}.");
+            if (pending.TimeModeSnapshot == TimeMode.WaitForPlayer)
+            {
+                MelonLogger.Msg($"AAD: counter-offer sent — customer={name}; awaiting player scheduling.");
+            }
+            else
+            {
+                var locStr = !string.IsNullOrEmpty(pending.LocationGuid) ? pending.LocationGuid : "default";
+                var winStr = pending.Window.HasValue ? pending.Window.Value.ToString() : "none";
+                MelonLogger.Msg($"AAD: contract accepted — customer={name}, location={locStr}, window={winStr}.");
+            }
         }
         catch (Exception ex)
         {
@@ -214,9 +220,10 @@ internal static class DealListener
                     MelonCoroutines.Start(ApplyLocationWhenContractAssigned(customer, locationGuid));
                 yield break;
             }
-            catch (Exception)
+            catch (Exception ex)
             {
-                // game not ready yet — retry next frame
+                if (attempt == 19)
+                    MelonLogger.Warning($"AAD: AcceptAfterDelay last retry threw: {ex.GetType().Name}: {ex.Message}");
             }
         }
         MelonLogger.Error($"AAD: PlayerAcceptedContract still failing after 20 frames for {customer.NPC?.fullName ?? "?"}; giving up.");
@@ -242,13 +249,8 @@ internal static class DealListener
 
     private static EDealWindow PickRandomWindow()
     {
-        return UnityEngine.Random.Range(0, 4) switch
-        {
-            0 => EDealWindow.Morning,
-            1 => EDealWindow.Afternoon,
-            2 => EDealWindow.Night,
-            _ => EDealWindow.LateNight,
-        };
+        var values = Enum.GetValues<EDealWindow>();
+        return values[UnityEngine.Random.Range(0, values.Length)];
     }
 
     private static DeliveryLocation? TryFindLocationByGuid(string? guid)

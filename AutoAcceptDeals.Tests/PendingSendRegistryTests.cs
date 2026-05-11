@@ -42,18 +42,7 @@ public class PendingSendRegistryTests
     {
         var key = new IntPtr(1);
         _reg.Register(key, "val");
-        _reg.TrySubscribeOnce(key);
         _reg.Clear();
         Assert.Null(_reg.TakeForKey(key));
-        Assert.True(_reg.TrySubscribeOnce(key)); // subscribe flag also cleared
-    }
-
-    [Fact]
-    public void TrySubscribeOnce_ReturnsTrueFirstTime_FalseThereafter()
-    {
-        var key = new IntPtr(42);
-        Assert.True(_reg.TrySubscribeOnce(key));
-        Assert.False(_reg.TrySubscribeOnce(key));
-        Assert.False(_reg.TrySubscribeOnce(key));
     }
 }

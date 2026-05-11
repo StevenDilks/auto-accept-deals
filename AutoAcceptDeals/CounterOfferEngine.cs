@@ -58,6 +58,7 @@ internal static class CounterOfferEngine
         int floorInt = (int)Math.Ceiling(floor);
         if (ceiling <= floorInt) return (floor, "probability-floor-at-limit");
 
+        // No iteration cap needed — integer bisection over a finite [lo, hi] range terminates in ≤ log2(range) steps.
         int lo = floorInt, hi = ceiling, best = -1;
         while (lo <= hi)
         {
