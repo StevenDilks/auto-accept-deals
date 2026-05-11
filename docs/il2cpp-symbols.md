@@ -79,13 +79,24 @@ Same applies if any later phase needs `Assembly-CSharp-firstpass.dll`.
 - **Non-deterministic.** Three identical calls `EvaluateCounteroffer(greencrack, 25, X)` for converging X returned different best-accept thresholds: 1606, 1643, 1736. ~8% spread. The function rolls internally — likely consults `Customer.OfferSuccessChance` or equivalent. Binary search assumes monotonicity which breaks under randomness; convergence drifts run-to-run. Phase 6 ships best-effort; Phase 7 will need sample-N-take-min, a safety margin, or a deterministic alternative.
 - Each call is one server-side roll; the symbols-map note about "per-roll" RNG advance still applies. Bisecting at most 32 integer prices per deal hasn't shown adverse effects in play.
 
+**Phase 7 note:** `EvaluateCounteroffer` is no longer called in the mod's hot path. Phase 7 replaced the binary search with a deterministic probability reimplementation ported from BetterCounterOfferUI 3.3.0 (OverweightUnicorn) — see `CounterOfferEngine.ProbabilityContext`. The formula is pure math over public game APIs and gives stable convergence across identical inputs.
+
+### `Customer.GetValueProposition(ProductDefinition, float unitPrice) -> float` (static)
+
+**Not dead — actively used.** Earlier drafts of this doc marked it as suspect because its body appears empty in Cpp2IL output (a Cpp2IL decompilation artifact, not an actual empty function). BetterCounterOfferUI 3.3.0 calls it in `CalculateSuccessProbability` and gets useful values. Phase 7 adopts this: `ProbabilityContext.Capture` calls it to compute the baseline value proposition at the customer's original offer price, and `SearchByProbability` calls it once per binary-search iteration to compute `vp2` for the current candidate price.
+
+| Field | Value |
+| --- | --- |
+| Cpp2IL form | `ScheduleOne.Economy.Customer.GetValueProposition(ProductDefinition product, float unitPrice) -> float` |
+| Il2CppInterop form | `static float` — callable as `Customer.GetValueProposition(product, unitPrice)` |
+| Source (Cpp2IL) | `Customer.cs:924` |
+
 ### Rejected alternative: `Customer.GetOfferSuccessChance(List<ItemInstance>, float) -> float`
 
 Listed in earlier drafts of this doc as the primary oracle. **Empirically broken or stale** — investigated and rejected during Phase 6:
 
 - Returns `0.0` deterministically regardless of basket construction. Tested with both `new ProductItemInstance(product, qty, quality, null)` and the proper factory `product.GetDefaultInstance(qty)` + `SetQuality(quality)` (which yields a `WeedInstance` / `MethInstance` / etc. with default packaging from `ProductDefinition.ValidPackaging[0]`). Same zero result. `EvaluateCounteroffer` returned `true` on the same `(product, qty, perUnitPrice)` inputs, so the basket isn't the problem — the function is.
 - **Zero callers in the entire decompiled `Assembly-CSharp`.** No game code invokes it. Strongly suggests it's stale/dead developer API and not the engine's true acceptance oracle.
-- The auxiliary `Customer.GetValueProposition(ProductDefinition, price) -> float` (static, line 924) is documented as feeding into this function and is similarly suspect — bodies are empty in Cpp2IL, no callers, untested.
 
 If a future phase needs a **probability** rather than a boolean (e.g., to surface "85% likely to accept" in the UI), it would have to either implement chance estimation by repeated `EvaluateCounteroffer` calls under varied RNG state, or reverse the function from the disassembled native binary. Don't trust `GetOfferSuccessChance` without re-verifying it against `EvaluateCounteroffer` first.
 
@@ -193,13 +204,12 @@ UI types involved (Phase 7 *opt-in* for time-mode 3 only):
 - `ScheduleOne.UI.Phone.CounterOfferProductSelector` — product+qty+price entry inside it
 - `ScheduleOne.UI.Phone.Messages.MessagesApp.CounterofferInterface` field — entry point
 
-**Caveats — flag for Phase 7:**
+**Phase 7 implementation notes:**
 
-- `SendCounteroffer` takes a `ProductDefinition`, not `ProductList`. The customer's incoming offer carries a `ProductList` — Phase 7 must extract the first/correct `ProductDefinition` (and verify there's exactly one product per offer; observed behavior should be confirmed at runtime).
-- Location and time on the counter-offer are **not** parameters to `SendCounteroffer`. They are filled in server-side by `ProcessCounterOfferServerSide` from the customer's defaults. So Phase 7's location/time settings cannot be applied through `SendCounteroffer` alone — Phase 7 must either:
-  - (a) After the counter-offer round-trips and a `Contract` is assigned (`onContractAssigned` UnityEvent), modify the resulting `Contract.DeliveryLocation` / `Contract.DeliveryWindow`. Server-side, may need an additional RPC.
-  - (b) Patch `ProcessCounterOfferServerSide` to substitute our location/time before evaluation.
-  - **This is the riskiest open question for Phase 7** — call out at the start of Phase 7's plan and verify before committing to (a) or (b).
+- `SendCounteroffer.price` parameter uses **total dollars** — same semantics as `EvaluateCounteroffer` (which `ProcessCounterOfferServerSide` calls server-side). Verify empirically by checking `customer.CurrentContract.Payment` after the first in-game send; `Payment == total_sent` confirms total-dollar semantics.
+- Location and time are **not** parameters to `SendCounteroffer`. Phase 7 chose approach **(a)**: subscribe to `onContractAssigned` (UnityEvent<Contract>) on the customer, then in the handler mutate `Contract.DeliveryLocation` (by `DeliveryLocation` reference) and `Contract.DeliveryWindow` (`QuestWindowConfig.IsEnabled/WindowStartTime/WindowEndTime`), then call `Customer.PlayerAcceptedContract(EDealWindow)` for Fixed/Randomize modes.
+- `onContractAssigned` confirmed as `UnityEvent<Contract>` (compiler error when passed `UnityAction` — required `UnityAction<Contract>`).
+- Approach **(b)** (Harmony prefix on `ProcessCounterOfferServerSide`) was rejected: `[ServerRpc(RequireOwnership=false)]` routes the call to the host, so a client-side prefix silently no-ops for non-host clients.
 
 ---
 
@@ -330,7 +340,7 @@ Morning, Afternoon, Night, LateNight
 
 These don't block any Phase, but Phase 6 / 7 should resolve them at the start of their work:
 
-1. ~~**Determinism of `GetOfferSuccessChance`.**~~ Resolved Phase 6: function is pure but always returns 0 for our baskets and has no in-game callers. Engine uses `Customer.EvaluateCounteroffer` instead. See §1.
-2. **Location and time on counter-offers.** `SendCounteroffer` does not accept location/time. Verify experimentally whether the resulting `Contract` inherits the customer's defaults vs. the original offer's values, then decide between modifying `Contract` post-acceptance and patching `ProcessCounterOfferServerSide`.
-3. **Multiplayer-as-client.** `OfferContract` runs server-side. In a multiplayer session where the local player is a client (not host), confirm whether the patch fires at all and whether `SendCounteroffer` from a client correctly round-trips through the server.
-4. **EDealWindow vs. minute-precision time.** `PlayerAcceptedContract(EDealWindow)` suggests window granularity is what the game really cares about. Phase 7 should confirm whether finer-grained `WindowStartTime` on `Contract.DeliveryWindow` is honored.
+1. ~~**Determinism of `GetOfferSuccessChance`.**~~ Resolved Phase 6: function is pure but always returns 0 for our baskets and has no in-game callers. Engine uses `Customer.EvaluateCounteroffer` instead; Phase 7 then replaced that with a deterministic probability reimplementation. See §1.
+2. ~~**Location and time on counter-offers.**~~ Resolved Phase 7: approach (a) chosen — subscribe to `onContractAssigned` (UnityEvent<Contract>), mutate `Contract.DeliveryLocation` and `Contract.DeliveryWindow`, call `PlayerAcceptedContract(window)` for Fixed/Randomize. See §4.
+3. **Multiplayer-as-client.** `OfferContract` runs server-side. In a multiplayer session where the local player is a client (not host), confirm whether the patch fires at all and whether `SendCounteroffer` from a client correctly round-trips through the server. **Deferred to Phase 8.**
+4. ~~**EDealWindow vs. minute-precision time.**~~ Resolved Phase 7: Phase 7 ships window-only. `PlayerAcceptedContract(EDealWindow)` is the API boundary; `Contract.DeliveryWindow.WindowStartTime/EndTime` are also set via `DealWindowInfo.GetWindowInfo(window)` for belt-and-suspenders.

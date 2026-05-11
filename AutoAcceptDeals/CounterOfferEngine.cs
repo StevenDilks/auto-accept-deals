@@ -1,5 +1,6 @@
 using System;
 using Il2CppScheduleOne.Economy;
+using Il2CppScheduleOne.ItemFramework;
 using Il2CppScheduleOne.Product;
 using MelonLoader;
 
@@ -15,35 +16,14 @@ internal sealed record CounterProposal(
 
 internal static class CounterOfferEngine
 {
-    private const int QuantityCap = 1000;        // Customer.MaxOrderQuantityPerProduct
-    private const int MinAbsoluteCeiling = 5_000; // total-dollar headroom for the search (caps tiny-offer ranges)
-    private const int MaxBisectIterations = 32;
+    private const int QuantityCap = 1000; // Customer.MaxOrderQuantityPerProduct
 
-    // TODO(Phase 7): remove _unitsProbed, RunUnitsProbeOnce, and OnSceneLeave once SendCounteroffer
-    //   is shipped and total-dollar semantics are locked in. OnSceneLeave becomes a no-op without these.
-    private static bool _unitsProbed;
+    // Phase 6 acceptance oracle (kept for reference, no longer called in the hot path):
+    // Customer.EvaluateCounteroffer(ProductDefinition, qty, totalPrice) -> bool — confirmed total-dollar.
+    // Non-deterministic: identical calls returned 1606/1643/1736 (~8% spread). Phase 7 replaces
+    // the bisect loop with a deterministic probability reimplementation ported from
+    // BetterCounterOfferUI 3.3.0 (OverweightUnicorn), which uses only public game APIs.
 
-    public static void OnSceneLeave()
-    {
-        _unitsProbed = false;
-    }
-
-    // Phase 6 acceptance oracle: Customer.EvaluateCounteroffer(ProductDefinition, qty, totalPrice) -> bool.
-    // Empirically confirmed (units probe, 2026-05-04): `price` is TOTAL dollars, not per-unit. Customer
-    // accepts at $1 (way below offer) and at the $1290 offer, rejects at $100k — classic "max-total"
-    // shape. Reinterpreting earlier puzzling convergence values: $1606 "per-unit" for 25 Poor greencrack
-    // was actually $1606 total = $64/unit, which fits game economy.
-    //
-    // Customer.GetOfferSuccessChance was investigated and rejected: returns 0.0 deterministically for
-    // baskets built either as `new ProductItemInstance(p, qty, quality, null)` or via factory
-    // `product.GetDefaultInstance(qty)` + `SetQuality(quality)`, and has no callers in decompiled
-    // Assembly-CSharp. EvaluateCounteroffer is what ProcessCounterOfferServerSide actually invokes.
-    //
-    // Known issue (deferred to Phase 7): EvaluateCounteroffer is non-deterministic. Three identical
-    // (customer, product, qty, price) calls returned converged values 1606 / 1643 / 1736 — an 8% spread.
-    // The function rolls internally. Binary search assumes monotonicity (accept => all-lower-accept),
-    // which breaks under randomness; convergence drifts run-to-run. For Phase 6 we ship best-effort and
-    // address when SendCounteroffer is wired up: probably sample-N-take-min, or apply a safety margin.
     public static bool TryPropose(DealRequest r, out CounterProposal proposal)
     {
         proposal = null!;
@@ -59,69 +39,93 @@ internal static class CounterOfferEngine
             MelonLogger.Warning($"AAD: engine — rounded qty {rounded} exceeds cap {QuantityCap}; clamping.");
         var effectiveQty = QuantityMath.Clamp(rounded, QuantityCap);
 
-        RunUnitsProbeOnce(r.Customer, r.Product, effectiveQty, r.Payment);
-
-        var (total, strategy) = SearchByEvaluator(r.Customer, r.Product, effectiveQty, r.Payment);
+        var (total, strategy) = SearchByProbability(r.Customer, r.Product, effectiveQty, r.Quantity, r.Payment);
 
         float unit = total / Math.Max(1, effectiveQty);
-        proposal = new CounterProposal(
-            r.Product, effectiveQty, unit, total, strategy, r.Quantity);
+        proposal = new CounterProposal(r.Product, effectiveQty, unit, total, strategy, r.Quantity);
         return true;
     }
 
-    private static void RunUnitsProbeOnce(Customer customer, ProductDefinition product, int qty, float offeredTotal)
+    // Binary-searches for the highest integer total-dollar price where Probability == 1.0f.
+    // ~17 iterations over [ceil(floor), spendingLimit-1].
+    private static (float total, string strategy) SearchByProbability(
+        Customer customer, ProductDefinition product, int qty, int origQty, float floor)
     {
-        if (_unitsProbed) return;
-        _unitsProbed = true;
+        var ctx = ProbabilityContext.Capture(customer, product, qty, origQty, floor);
+        if (ctx == null) return (floor, "probability-no-context");
 
-        bool low, atOffer, high;
-        try { low = customer.EvaluateCounteroffer(product, qty, 1f); }
-        catch (Exception ex) { MelonLogger.Warning($"AAD: units probe — at(1) threw: {ex.Message}"); return; }
-        try { atOffer = customer.EvaluateCounteroffer(product, qty, offeredTotal); }
-        catch (Exception ex) { MelonLogger.Warning($"AAD: units probe — at(offer) threw: {ex.Message}"); return; }
-        try { high = customer.EvaluateCounteroffer(product, qty, 100000f); }
-        catch (Exception ex) { MelonLogger.Warning($"AAD: units probe — at(100000) threw: {ex.Message}"); return; }
-
-        // Interpretation cheat sheet:
-        //   at(1)=true,  at(offer)=true, at(100000)=false → price is TOTAL dollars (customer accepts anything ≤ max-total)
-        //   at(1)=false, at(offer)=true, at(100000)=true  → price is PER-UNIT (with very loose ceiling)
-        //   at(1)=false, at(offer)=true, at(100000)=false → PER-UNIT with realistic ceiling (current assumption)
-        //   any other pattern → semantics unclear; needs deeper investigation.
-        MelonLogger.Msg(
-            $"AAD: units probe — product={product.ID}, qty={qty}, offeredTotal={offeredTotal:F0} | " +
-            $"at(1)={low}, at(offer={offeredTotal:F0})={atOffer}, at(100000)={high}");
-    }
-
-    // Returns (best_total_price, strategy). Total dollars at integer resolution (matches the in-game UI).
-    private static (float total, string strategy) SearchByEvaluator(
-        Customer customer, ProductDefinition product, int qty, float floor)
-    {
-        long rawCeiling = (long)Math.Max((double)floor * 16.0, (double)floor + MinAbsoluteCeiling);
-        int ceiling = (int)Math.Min(int.MaxValue - 1, rawCeiling);
+        int ceiling = (int)Math.Floor(ctx.SpendingLimit) - 1;
         int floorInt = (int)Math.Ceiling(floor);
-        int lo = floorInt;
-        int hi = ceiling;
-        int best = -1;
-        int iterations = 0;
-        while (lo <= hi && iterations++ < MaxBisectIterations)
+        if (ceiling <= floorInt) return (floor, "probability-floor-at-limit");
+
+        // No iteration cap needed — integer bisection over a finite [lo, hi] range terminates in ≤ log2(range) steps.
+        int lo = floorInt, hi = ceiling, best = -1;
+        while (lo <= hi)
         {
             int mid = lo + (hi - lo) / 2;
-            bool accepted;
-            try { accepted = customer.EvaluateCounteroffer(product, qty, mid); }
+            float vp2 = Customer.GetValueProposition(product, mid / (float)qty);
+            float p = ctx.Probability(mid, vp2);
+            if (p >= 1.0f) { best = mid; lo = mid + 1; } else hi = mid - 1;
+        }
+
+        if (best >= 0) return (best, "probability");
+
+        MelonLogger.Warning(
+            $"AAD: engine — probability formula found no 100%-accept price in [{floorInt}, {ceiling}] for {product.ID}; using floor unchanged.");
+        return (floor, "probability-no-accept");
+    }
+
+    private sealed class ProbabilityContext
+    {
+        public float SpendingLimit;
+        public float ValueProposition0;
+        public float ProductEnjoyment;
+        public int   OriginalQuantity;
+        public float MaxAddictionRelation;
+        public int   Qty;
+
+        public float Probability(float price, float vp2)
+            => ProbabilityFormula.Compute(
+                price, SpendingLimit, ValueProposition0, vp2,
+                ProductEnjoyment, Qty, OriginalQuantity, MaxAddictionRelation);
+
+        public static ProbabilityContext? Capture(
+            Customer customer, ProductDefinition product, int qty, int origQty, float origPayment)
+        {
+            try
+            {
+                var data = customer.customerData;
+                if (data == null) { MelonLogger.Warning("AAD: ProbabilityContext — customerData null."); return null; }
+                var npc = customer.NPC;
+                if (npc == null) { MelonLogger.Warning("AAD: ProbabilityContext — NPC null."); return null; }
+                var rel = npc.RelationData;
+                if (rel == null) { MelonLogger.Warning("AAD: ProbabilityContext — RelationData null."); return null; }
+
+                float relStrength = rel.RelationDelta / 5f;
+                float weeklySpend = data.GetAdjustedWeeklySpend(relStrength);
+                var orderDays = data.GetOrderDays(customer.CurrentAddiction, relStrength);
+                int dayCount = orderDays == null || orderDays.Count == 0 ? 1 : orderDays.Count;
+
+                float vp0 = Customer.GetValueProposition(product, origPayment / Math.Max(1, origQty));
+                var quality = StandardsMethod.GetCorrespondingQuality(data.Standards);
+                float enjoyment = customer.GetProductEnjoyment(product, quality);
+                float maxAddRel = Math.Max(customer.CurrentAddiction, rel.NormalizedRelationDelta);
+
+                return new ProbabilityContext
+                {
+                    SpendingLimit       = weeklySpend / dayCount * 3f,
+                    ValueProposition0   = vp0,
+                    ProductEnjoyment    = enjoyment,
+                    OriginalQuantity    = origQty,
+                    MaxAddictionRelation = maxAddRel,
+                    Qty                 = qty,
+                };
+            }
             catch (Exception ex)
             {
-                MelonLogger.Warning($"AAD: EvaluateCounteroffer threw at price {mid}: {ex.Message}");
-                break;
+                MelonLogger.Warning($"AAD: ProbabilityContext.Capture threw: {ex.Message}");
+                return null;
             }
-            if (accepted) { best = mid; lo = mid + 1; } else hi = mid - 1;
         }
-        if (best >= 0) return (best, "evaluator");
-
-        // Customer rejected every integer in [Ceiling(floor), ceiling]. Shouldn't happen in practice
-        // (a total ≥ the customer's own offer should accept), but ship the floor unchanged so the
-        // proposal logs the customer's exact offer rather than a junk value.
-        MelonLogger.Warning(
-            $"AAD: engine — EvaluateCounteroffer rejected every probe in [{floorInt}, {ceiling}] for {product.ID}; using floor unchanged.");
-        return (floor, "evaluator-no-accept");
     }
 }
