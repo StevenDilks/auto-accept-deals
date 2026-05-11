@@ -158,17 +158,6 @@ internal static class DealListener
 
             var name = customer.NPC?.fullName ?? "<unknown>";
 
-            // Apply location to ContractInfo synchronously (before OfferContract returns).
-            if (!string.IsNullOrEmpty(pending.LocationGuid))
-            {
-                var loc = TryFindLocationByGuid(pending.LocationGuid);
-                if (loc != null)
-                    info.DeliveryLocationGUID = loc.StaticGUID;
-                else
-                    MelonLogger.Warning(
-                        $"AAD: HandleCounterOfferAccepted — GUID '{pending.LocationGuid}' not found in map; leaving customer default.");
-            }
-
             // Apply window times to ContractInfo synchronously.
             if (pending.TimeModeSnapshot != TimeMode.WaitForPlayer && pending.Window.HasValue)
             {
@@ -205,14 +194,20 @@ internal static class DealListener
             yield return null;
             try
             {
-                customer.PlayerAcceptedContract(window);
+                // Stamp location on OfferedContractInfo on every attempt — the game can reset
+                // DeliveryLocationGUID between frames, so we must re-apply each retry.
                 if (!string.IsNullOrEmpty(locationGuid))
                 {
-                    var contract = customer.CurrentContract;
-                    var loc = TryFindLocationByGuid(locationGuid);
-                    if (contract != null && loc != null)
-                        contract.DeliveryLocation = loc;
+                    var offered = customer.OfferedContractInfo;
+                    if (offered != null)
+                        offered.DeliveryLocationGUID = locationGuid;
                 }
+
+                customer.PlayerAcceptedContract(window);
+
+                // CurrentContract is assigned asynchronously — belt-and-suspenders via a second coroutine.
+                if (!string.IsNullOrEmpty(locationGuid))
+                    MelonCoroutines.Start(ApplyLocationWhenContractAssigned(customer, locationGuid));
                 yield break;
             }
             catch (Exception)
@@ -221,6 +216,24 @@ internal static class DealListener
             }
         }
         MelonLogger.Error($"AAD: PlayerAcceptedContract still failing after 20 frames for {customer.NPC?.fullName ?? "?"}; giving up.");
+    }
+
+    private static IEnumerator ApplyLocationWhenContractAssigned(Customer customer, string locationGuid)
+    {
+        for (int i = 0; i < 30; i++)
+        {
+            yield return null;
+            var contract = customer.CurrentContract;
+            if (contract == null) continue;
+
+            var loc = TryFindLocationByGuid(locationGuid);
+            if (loc != null)
+                contract.DeliveryLocation = loc;
+            else
+                MelonLogger.Warning($"AAD: GUID '{locationGuid}' not found when applying to CurrentContract.");
+            yield break;
+        }
+        MelonLogger.Warning($"AAD: CurrentContract never assigned for {customer.NPC?.fullName ?? "?"}; location not applied.");
     }
 
     private static EDealWindow PickRandomWindow()
