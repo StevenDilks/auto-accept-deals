@@ -7,6 +7,7 @@ using Il2CppScheduleOne;
 using Il2CppScheduleOne.Economy;
 using Il2CppScheduleOne.ItemFramework;
 using Il2CppScheduleOne.Map;
+using Il2CppScheduleOne.Messaging;
 using Il2CppScheduleOne.Product;
 using Il2CppScheduleOne.Quests;
 using MelonLoader;
@@ -204,6 +205,9 @@ internal static class DealListener
                 }
 
                 customer.PlayerAcceptedContract(window);
+
+                if (MessagingManager.InstanceExists)
+                    MessagingManager.Instance.GetConversation(customer.NPC)?.SetRead(true);
 
                 // CurrentContract is assigned asynchronously — belt-and-suspenders via a second coroutine.
                 if (!string.IsNullOrEmpty(locationGuid))
