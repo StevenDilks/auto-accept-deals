@@ -51,6 +51,8 @@ internal static class ProbabilityFormula
         if (vp2 < 0.12f) return 0f;
 
         float num2 = InverseLerp(-1f, 1f, productEnjoyment);
+        // Faithful port: BetterCounterOfferUI uses raw productEnjoyment here (not the clamped num2).
+        // When productEnjoyment < 0, num6 < 0 while num7 ≥ 0, so num7 > num6 always fires → returns 1f.
         float num6 = productEnjoyment * vp0;
         float num7 = num2 * num5 * vp2;
         if (num7 > num6) return 1f;

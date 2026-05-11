@@ -27,6 +27,12 @@ public class ProbabilityFormulaTests
     public void BottomEndCut_Vp2BelowThreshold_Returns0()
         => Assert.Equal(0f, ProbabilityFormula.Compute(500f, 1000f, vp0: 0.5f, vp2: 0.11f, 0f, Q, Q, 0f));
 
+    // Negative enjoyment: num6 = productEnjoyment * vp0 < 0; num7 = num2 * num5 * vp2 ≥ 0 → num7 > num6 always → 1f.
+    // Faithful port of BetterCounterOfferUI; the guard is intentionally bypassed for disliked products.
+    [Fact]
+    public void NegativeEnjoyment_AlwaysReturns1()
+        => Assert.Equal(1f, ProbabilityFormula.Compute(500f, 1000f, vp0: 0.5f, vp2: 0.4f, productEnjoyment: -0.5f, Q, Q, 0f));
+
     // High enjoyment pushes num7 above num6 → 1f
     // enjoyment=1 → num2=1; vp2=0.4, vp0=0.3: vp2*num5=0.4>0.3 fires the top-end cut first.
     // Use enjoyment=0.5 (num2=0.75), vp2=0.4, vp0=0.5:
