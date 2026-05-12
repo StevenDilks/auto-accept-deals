@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using HarmonyLib;
 using Il2CppScheduleOne.Economy;
 using Il2CppScheduleOne.Map;
@@ -60,7 +61,7 @@ public class Mod : MelonMod
             (typeof(MessagingManager), "GetConversation", false),
         };
 
-        var failures = new System.Collections.Generic.List<string>();
+        var failures = new List<string>();
         foreach (var (type, member, isProperty) in checks)
         {
             var found = isProperty
