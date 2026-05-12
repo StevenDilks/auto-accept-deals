@@ -1,3 +1,9 @@
+using System;
+using HarmonyLib;
+using Il2CppScheduleOne.Economy;
+using Il2CppScheduleOne.Map;
+using Il2CppScheduleOne.Messaging;
+using Il2CppScheduleOne.Quests;
 using Il2CppTMPro;
 using MelonLoader;
 using UnityEngine;
@@ -21,8 +27,51 @@ public class Mod : MelonMod
     public override void OnInitializeMelon()
     {
         Settings.Load();
-        HarmonyInstance.PatchAll(typeof(Mod).Assembly);
+        if (!VerifyRequiredSymbols()) return;
+        try
+        {
+            HarmonyInstance.PatchAll(typeof(Mod).Assembly);
+        }
+        catch (Exception ex)
+        {
+            ModState.MarkLoadFailed();
+            LoggerInstance.Error(
+                $"AutoAcceptDeals disabled: Harmony PatchAll failed ({ex.GetType().Name}: {ex.Message}). " +
+                "Likely incompatible Schedule I version. Expected v0.4.5f2.");
+            return;
+        }
         LoggerInstance.Msg("AutoAcceptDeals loaded — enabled. Press O in-game to toggle, F8 to open settings.");
+    }
+
+    private bool VerifyRequiredSymbols()
+    {
+        var checks = new (Type type, string member, bool isProperty)[]
+        {
+            (typeof(Customer), nameof(Customer.OfferContract), false),
+            (typeof(Customer), nameof(Customer.SendCounteroffer), false),
+            (typeof(Customer), nameof(Customer.PlayerAcceptedContract), false),
+            (typeof(Customer), nameof(Customer.OfferedContractInfo), true),
+            (typeof(Customer), nameof(Customer.CurrentContract), true),
+            (typeof(Map), "GetRegionFromPosition", false),
+            (typeof(DealWindowInfo), "GetWindowInfo", false),
+            (typeof(MessagingManager), "GetConversation", false),
+        };
+
+        foreach (var (type, member, isProperty) in checks)
+        {
+            var found = isProperty
+                ? (object?)AccessTools.PropertyGetter(type, member)
+                : AccessTools.Method(type, member);
+            if (found == null)
+            {
+                ModState.MarkLoadFailed();
+                LoggerInstance.Error(
+                    $"AutoAcceptDeals disabled: required game symbol not found: {type.Name}.{member} — " +
+                    "likely incompatible Schedule I version. Expected v0.4.5f2 (MelonLoader 0.7.1).");
+                return false;
+            }
+        }
+        return true;
     }
 
     public override void OnSceneWasInitialized(int buildIndex, string sceneName)

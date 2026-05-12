@@ -326,10 +326,12 @@ internal static class DealListener
 
         int total = 0;
         var lines = new List<string>();
+        var regionsWalked = new List<EMapRegion>();
         foreach (var regionData in regions)
         {
             if (regionData == null) continue;
             var region = regionData.Region;
+            regionsWalked.Add(region);
             var found = new List<DiscoveredLocation>();
             var seenGuids = new HashSet<string>();
             var locs = regionData.RegionDeliveryLocations;
@@ -351,6 +353,15 @@ internal static class DealListener
             lines.Add($"  {region}: {found.Count} location(s) — " +
                       string.Join(", ", found.Select(l => $"{l.Name} ({l.Guid})")));
         }
+
+        var expected = new HashSet<EMapRegion>(Enum.GetValues<EMapRegion>());
+        var runtime = new HashSet<EMapRegion>(regionsWalked);
+        var missing = expected.Except(runtime).ToList();
+        var extra = runtime.Except(expected).ToList();
+        if (missing.Count > 0 || extra.Count > 0)
+            MelonLogger.Warning(
+                $"AAD: region drift — compile-time enum has {expected.Count}, runtime has {runtime.Count}. " +
+                $"Missing=[{string.Join(",", missing)}], extra=[{string.Join(",", extra)}].");
 
         _discoveredThisSession = true;
 
