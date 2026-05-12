@@ -357,6 +357,7 @@ internal static class DealListener
         var expected = new HashSet<EMapRegion>(Enum.GetValues<EMapRegion>());
         var runtime = new HashSet<EMapRegion>(regionsWalked);
         var missing = expected.Except(runtime).ToList();
+        // extra: unreachable post-IL2CPP-build in practice; kept as a belt-and-suspenders guard
         var extra = runtime.Except(expected).ToList();
         if (missing.Count > 0 || extra.Count > 0)
             MelonLogger.Warning(

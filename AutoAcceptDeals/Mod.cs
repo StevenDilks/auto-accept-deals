@@ -37,11 +37,13 @@ public class Mod : MelonMod
             ModState.MarkLoadFailed();
             LoggerInstance.Error(
                 $"AutoAcceptDeals disabled: Harmony PatchAll failed ({ex.GetType().Name}: {ex.Message}). " +
-                "Likely incompatible Schedule I version. Expected v0.4.5f2.");
+                $"Likely incompatible Schedule I version. Expected {ExpectedVersion}.");
             return;
         }
         LoggerInstance.Msg("AutoAcceptDeals loaded — enabled. Press O in-game to toggle, F8 to open settings.");
     }
+
+    private const string ExpectedVersion = "v0.4.5f2 (MelonLoader 0.7.1)";
 
     private bool VerifyRequiredSymbols()
     {
@@ -52,24 +54,27 @@ public class Mod : MelonMod
             (typeof(Customer), nameof(Customer.PlayerAcceptedContract), false),
             (typeof(Customer), nameof(Customer.OfferedContractInfo), true),
             (typeof(Customer), nameof(Customer.CurrentContract), true),
+            // nameof not usable — these members aren't referenced directly in this assembly
             (typeof(Map), "GetRegionFromPosition", false),
             (typeof(DealWindowInfo), "GetWindowInfo", false),
             (typeof(MessagingManager), "GetConversation", false),
         };
 
+        var failures = new System.Collections.Generic.List<string>();
         foreach (var (type, member, isProperty) in checks)
         {
             var found = isProperty
                 ? (object?)AccessTools.PropertyGetter(type, member)
                 : AccessTools.Method(type, member);
-            if (found == null)
-            {
-                ModState.MarkLoadFailed();
-                LoggerInstance.Error(
-                    $"AutoAcceptDeals disabled: required game symbol not found: {type.Name}.{member} — " +
-                    "likely incompatible Schedule I version. Expected v0.4.5f2 (MelonLoader 0.7.1).");
-                return false;
-            }
+            if (found == null) failures.Add($"{type.Name}.{member}");
+        }
+        if (failures.Count > 0)
+        {
+            ModState.MarkLoadFailed();
+            LoggerInstance.Error(
+                $"AutoAcceptDeals disabled: missing game symbols: {string.Join(", ", failures)} — " +
+                $"likely incompatible Schedule I version. Expected {ExpectedVersion}.");
+            return false;
         }
         return true;
     }
