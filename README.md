@@ -116,10 +116,10 @@ CI cannot build the mod — the Schedule I IL2CPP DLLs are not available on host
 2. Build locally and upload the artifact.
 
 ```
-git tag v0.1.0
-git push origin v0.1.0        # fires the workflow, creates the GH release
+git tag v0.1.1
+git push origin v0.1.1        # fires the workflow, creates the GH release
 dotnet build -c Release
-gh release upload v0.1.0 AutoAcceptDeals/bin/Release/AutoAcceptDeals.dll
+gh release upload v0.1.1 AutoAcceptDeals/bin/Release/AutoAcceptDeals.dll
 ```
 
 Tags containing a hyphen (e.g. `v0.1.0-beta`) are automatically marked as pre-releases.
