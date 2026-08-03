@@ -11,7 +11,7 @@ A [Schedule I](https://store.steampowered.com/app/3164500/) mod that automatical
 
 ## Supported game version
 
-Schedule I `0.4.5f2` · Unity `2022.3.62f2` · MelonLoader `0.7.1 Open-Beta`
+Schedule I `0.4.6f11` · Unity `2022.3.62f2` · MelonLoader `0.7.3 Open-Beta`
 
 If the mod detects a version mismatch (a required game symbol is missing or renamed), it disables itself and logs all missing symbols to `Latest.log` rather than crashing.
 
@@ -29,7 +29,7 @@ If you moved your Steam library, right-click the game in Steam → **Manage → 
 
 ### 2. Install MelonLoader
 
-Download and run the [MelonLoader](https://melonwiki.xyz/) installer (`MelonLoader.Installer.exe`). Select `Schedule I.exe` from your install directory and choose version `0.7.1 Open-Beta`. The installer patches the game executable — you do not need to copy any files manually.
+Download and run the [MelonLoader](https://melonwiki.xyz/) installer (`MelonLoader.Installer.exe`). Select `Schedule I.exe` from your install directory and choose version `0.7.3 Open-Beta`. The installer patches the game executable — you do not need to copy any files manually.
 
 Launch the game once after installing MelonLoader and then close it. This lets MelonLoader finish its first-run setup and create the `Mods\` folder inside your install directory.
 
