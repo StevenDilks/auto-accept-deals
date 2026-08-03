@@ -63,6 +63,7 @@ public class Mod : MelonMod
             // Signature-sensitive: SettingsPanel calls these with a bool argument specifically.
             (typeof(PlayerCamera), "LockMouse", false, new[] { typeof(bool) }),
             (typeof(PlayerCamera), "FreeMouse", false, new[] { typeof(bool) }),
+            (typeof(PlayerCamera), nameof(PlayerCamera.CanLook), true, null),
         };
 
         var failures = new List<string>();
