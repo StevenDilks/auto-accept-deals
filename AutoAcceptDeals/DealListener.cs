@@ -98,7 +98,7 @@ internal static class DealListener
 
     private static void ProcessRequest(DealRequest r)
     {
-        var name = r.Customer.NPC?.fullName ?? "<unknown>";
+        var name = r.Customer.NPC?.FullName ?? "<unknown>";
         var region = r.Region.HasValue ? r.Region.Value.ToString() : "<unresolved>";
         MelonLogger.Msg(
             $"AAD: deal request — customer={name}, product={r.ProductId}×{r.Quantity} ({r.Quality}), region={region}, payment={r.Payment}");
@@ -116,7 +116,7 @@ internal static class DealListener
     private static void SendCounterOffer(DealRequest r, CounterProposal p)
     {
         var customer = r.Customer;
-        var name = customer.NPC?.fullName ?? "<unknown>";
+        var name = customer.NPC?.FullName ?? "<unknown>";
 
         // Resolve location GUID at send time; snapshot so a settings change mid-flight can't corrupt the contract.
         string? locationGuid = Settings.LocationMode == LocationMode.Global
@@ -156,7 +156,7 @@ internal static class DealListener
             var pending = _registry.TakeForKey(customer.Pointer);
             if (pending == null) return; // not from our send path
 
-            var name = customer.NPC?.fullName ?? "<unknown>";
+            var name = customer.NPC?.FullName ?? "<unknown>";
 
             // Apply window times to ContractInfo synchronously.
             if (pending.TimeModeSnapshot != TimeMode.WaitForPlayer && pending.Window.HasValue)
@@ -226,7 +226,7 @@ internal static class DealListener
                     MelonLogger.Warning($"AAD: AcceptAfterDelay last retry threw: {ex.GetType().Name}: {ex.Message}");
             }
         }
-        MelonLogger.Error($"AAD: PlayerAcceptedContract still failing after 20 frames for {customer.NPC?.fullName ?? "?"}; giving up.");
+        MelonLogger.Error($"AAD: PlayerAcceptedContract still failing after 20 frames for {customer.NPC?.FullName ?? "?"}; giving up.");
     }
 
     private static IEnumerator ApplyLocationWhenContractAssigned(Customer customer, string locationGuid)
@@ -244,7 +244,7 @@ internal static class DealListener
                 MelonLogger.Warning($"AAD: GUID '{locationGuid}' not found when applying to CurrentContract.");
             yield break;
         }
-        MelonLogger.Warning($"AAD: CurrentContract never assigned for {customer.NPC?.fullName ?? "?"}; location not applied.");
+        MelonLogger.Warning($"AAD: CurrentContract never assigned for {customer.NPC?.FullName ?? "?"}; location not applied.");
     }
 
     private static EDealWindow PickRandomWindow()

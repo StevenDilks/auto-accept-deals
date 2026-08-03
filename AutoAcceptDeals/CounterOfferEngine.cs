@@ -103,8 +103,9 @@ internal static class CounterOfferEngine
 
                 float relStrength = rel.RelationDelta / 5f;
                 float weeklySpend = data.GetAdjustedWeeklySpend(relStrength);
-                var orderDays = data.GetOrderDays(customer.CurrentAddiction, relStrength);
-                int dayCount = orderDays == null || orderDays.Count == 0 ? 1 : orderDays.Count;
+                var orderDays = new Il2CppSystem.Collections.Generic.List<Il2CppScheduleOne.GameTime.EDay>();
+                data.GetOrderDays(customer.CurrentAddiction, relStrength, orderDays);
+                int dayCount = orderDays.Count == 0 ? 1 : orderDays.Count;
 
                 float vp0 = Customer.GetValueProposition(product, origPayment / Math.Max(1, origQty));
                 var quality = StandardsMethod.GetCorrespondingQuality(data.Standards);

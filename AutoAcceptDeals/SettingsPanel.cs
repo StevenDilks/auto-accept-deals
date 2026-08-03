@@ -51,10 +51,10 @@ internal static class SettingsPanel
         var cam = GetCamera();
         if (cam != null)
         {
-            _savedCanLook = cam.canLook;
+            _savedCanLook = cam.CanLook;
             cam.AddActiveUIElement(UIElementName);
             cam.SetCanLook(false);
-            cam.FreeMouse();
+            cam.FreeMouse(true);
             _suppressedCamera = true;
         }
         var move = GetMovement();
@@ -84,7 +84,7 @@ internal static class SettingsPanel
             {
                 cam.RemoveActiveUIElement(UIElementName);
                 cam.SetCanLook(_savedCanLook);
-                if (_savedCanLook) cam.LockMouse();
+                if (_savedCanLook) cam.LockMouse(true);
             }
             _suppressedCamera = false;
         }

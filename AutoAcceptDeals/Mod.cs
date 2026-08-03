@@ -4,6 +4,7 @@ using HarmonyLib;
 using Il2CppScheduleOne.Economy;
 using Il2CppScheduleOne.Map;
 using Il2CppScheduleOne.Messaging;
+using Il2CppScheduleOne.PlayerScripts;
 using Il2CppScheduleOne.Quests;
 using Il2CppTMPro;
 using MelonLoader;
@@ -11,7 +12,7 @@ using UnityEngine;
 using UnityEngine.EventSystems;
 using UnityEngine.UI;
 
-[assembly: MelonInfo(typeof(AutoAcceptDeals.Mod), "AutoAcceptDeals", "0.1.0", "Steven Dilks")]
+[assembly: MelonInfo(typeof(AutoAcceptDeals.Mod), "AutoAcceptDeals", "0.1.1", "Steven Dilks")]
 [assembly: MelonGame("TVGS", "Schedule I")]
 
 namespace AutoAcceptDeals;
@@ -44,29 +45,33 @@ public class Mod : MelonMod
         LoggerInstance.Msg("AutoAcceptDeals loaded — enabled. Press O in-game to toggle, F8 to open settings.");
     }
 
-    private const string ExpectedVersion = "v0.4.5f2 (MelonLoader 0.7.1)";
+    private const string ExpectedVersion = "v0.4.6f11 (MelonLoader 0.7.3)";
 
     private bool VerifyRequiredSymbols()
     {
-        var checks = new (Type type, string member, bool isProperty)[]
+        var checks = new (Type type, string member, bool isProperty, Type[]? paramTypes)[]
         {
-            (typeof(Customer), nameof(Customer.OfferContract), false),
-            (typeof(Customer), nameof(Customer.SendCounteroffer), false),
-            (typeof(Customer), nameof(Customer.PlayerAcceptedContract), false),
-            (typeof(Customer), nameof(Customer.OfferedContractInfo), true),
-            (typeof(Customer), nameof(Customer.CurrentContract), true),
+            (typeof(Customer), nameof(Customer.OfferContract), false, null),
+            (typeof(Customer), nameof(Customer.SendCounteroffer), false, null),
+            (typeof(Customer), nameof(Customer.PlayerAcceptedContract), false, null),
+            (typeof(Customer), nameof(Customer.OfferedContractInfo), true, null),
+            (typeof(Customer), nameof(Customer.CurrentContract), true, null),
             // nameof not usable — these members aren't referenced directly in this assembly
-            (typeof(Map), "GetRegionFromPosition", false),
-            (typeof(DealWindowInfo), "GetWindowInfo", false),
-            (typeof(MessagingManager), "GetConversation", false),
+            (typeof(Map), "GetRegionFromPosition", false, null),
+            (typeof(DealWindowInfo), "GetWindowInfo", false, null),
+            (typeof(MessagingManager), "GetConversation", false, null),
+            // Signature-sensitive: SettingsPanel calls these with a bool argument specifically.
+            (typeof(PlayerCamera), "LockMouse", false, new[] { typeof(bool) }),
+            (typeof(PlayerCamera), "FreeMouse", false, new[] { typeof(bool) }),
+            (typeof(PlayerCamera), nameof(PlayerCamera.CanLook), true, null),
         };
 
         var failures = new List<string>();
-        foreach (var (type, member, isProperty) in checks)
+        foreach (var (type, member, isProperty, paramTypes) in checks)
         {
             var found = isProperty
                 ? (object?)AccessTools.PropertyGetter(type, member)
-                : AccessTools.Method(type, member);
+                : AccessTools.Method(type, member, paramTypes);
             if (found == null) failures.Add($"{type.Name}.{member}");
         }
         if (failures.Count > 0)
