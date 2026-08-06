@@ -54,6 +54,11 @@ internal static class DealListener
 
     private static readonly PendingSendRegistry<PendingSend> _registry = new();
 
+    // Set by HandleCounterOfferAccepted, which fires synchronously nested inside the
+    // customer.SendCounteroffer(...) call below — consumed there to fold the outcome
+    // into a single log line instead of a separate one.
+    private static string? _lastOutcome;
+
     public static void HandleOffer(Customer customer, ContractInfo info)
     {
         if (!ModState.ShouldRun) return;
@@ -101,18 +106,7 @@ internal static class DealListener
 
     private static void ProcessRequest(DealRequest r)
     {
-        var name = r.Customer.NPC?.FullName ?? "<unknown>";
-        var region = r.Region.HasValue ? r.Region.Value.ToString() : "<unresolved>";
-        MelonLogger.Msg(
-            $"AAD: deal request — customer={name}, product={r.ProductId}×{r.Quantity} ({r.Quality}), region={region}, payment={r.Payment}");
-
         if (!CounterOfferEngine.TryPropose(r, out var p)) return;
-
-        MelonLogger.Msg(
-            $"AAD: proposal — customer={name}, product={r.ProductId}×{p.Quantity} (orig={p.OriginalQuantity}, {r.Quality}), " +
-            $"unit={p.UnitPrice:F2}, total={p.TotalPrice:F0} (orig payment={r.Payment:F0}, +{p.TotalPrice - r.Payment:F0}), " +
-            $"strategy={p.Strategy}.");
-
         SendCounterOffer(r, p);
     }
 
@@ -120,6 +114,7 @@ internal static class DealListener
     {
         var customer = r.Customer;
         var name = customer.NPC?.FullName ?? "<unknown>";
+        var region = r.Region.HasValue ? r.Region.Value.ToString() : "<unresolved>";
 
         // Resolve location GUID at send time; snapshot so a settings change mid-flight can't corrupt the contract.
         string? locationGuid = Settings.LocationMode == LocationMode.Global
@@ -129,8 +124,7 @@ internal static class DealListener
         if (Settings.LocationMode == LocationMode.Global && locationGuid == null)
             MelonLogger.Warning($"AAD: SendCounterOffer — Global location unset for {name}; leaving customer default.");
         else if (Settings.LocationMode == LocationMode.PerRegion && locationGuid == null)
-            MelonLogger.Warning(
-                $"AAD: SendCounterOffer — PerRegion location unset for {(r.Region.HasValue ? r.Region.Value.ToString() : "<unresolved>")}; leaving customer default.");
+            MelonLogger.Warning($"AAD: SendCounterOffer — PerRegion location unset for {region}; leaving customer default.");
 
         EDealWindow? window = Settings.TimeMode switch
         {
@@ -142,12 +136,18 @@ internal static class DealListener
         var pending = new PendingSend(locationGuid, window, Settings.TimeMode, customer, r.ProductId, p.Quantity, p.TotalPrice);
         _registry.Register(customer.Pointer, pending);
 
+        _lastOutcome = null;
         // SendCounteroffer.price is total dollars — same semantics as EvaluateCounteroffer (confirmed Phase 6).
         customer.SendCounteroffer(p.Product, p.Quantity, p.TotalPrice);
 
+        var windowStr = Settings.TimeMode == TimeMode.WaitForPlayer
+            ? "player-chosen"
+            : (window.HasValue ? window.Value.ToString() : "none");
+
         MelonLogger.Msg(
-            $"AAD: SendCounteroffer dispatched — customer={name}, product={r.ProductId}×{p.Quantity}, " +
-            $"total={p.TotalPrice:F0}, mode={Settings.TimeMode}, location-set={locationGuid != null}.");
+            $"AAD: {name} — {r.ProductId}×{p.OriginalQuantity}→{p.Quantity} ({r.Quality}), " +
+            $"payment {r.Payment:F0}→{p.TotalPrice:F0} ({p.Strategy}), region={region}, " +
+            $"location={locationGuid ?? "default"}, window={windowStr} → {_lastOutcome ?? "no confirmation"}.");
     }
 
     // Called when OfferContract fires and the registry has a pending entry for this customer —
@@ -158,8 +158,6 @@ internal static class DealListener
         {
             var pending = _registry.TakeForKey(customer.Pointer);
             if (pending == null) return; // not from our send path
-
-            var name = customer.NPC?.FullName ?? "<unknown>";
 
             // The game's own counter-offer round-trip doesn't reliably leave OfferedContractInfo
             // holding the quantity/price we sent (observed in-game: customer order reverts to what
@@ -183,16 +181,11 @@ internal static class DealListener
                 MelonCoroutines.Start(AcceptAfterDelay(customer, pending));
             }
 
-            if (pending.TimeModeSnapshot == TimeMode.WaitForPlayer)
-            {
-                MelonLogger.Msg($"AAD: counter-offer sent — customer={name}; awaiting player scheduling.");
-            }
-            else
-            {
-                var locStr = !string.IsNullOrEmpty(pending.LocationGuid) ? pending.LocationGuid : "default";
-                var winStr = pending.Window.HasValue ? pending.Window.Value.ToString() : "none";
-                MelonLogger.Msg($"AAD: contract accepted — customer={name}, location={locStr}, window={winStr}.");
-            }
+            // Fed back into the single consolidated log line in SendCounterOffer, which is
+            // still on the stack above us (see comment on _lastOutcome).
+            _lastOutcome = pending.TimeModeSnapshot == TimeMode.WaitForPlayer
+                ? "awaiting player scheduling"
+                : "accepted";
         }
         catch (Exception ex)
         {
@@ -384,10 +377,17 @@ internal static class DealListener
             }
 
             DiffAndWarn(region, found);
+
+            // Only worth a log line if this region has locations not already in the config file.
+            var cachedGuids = Settings.DiscoveredLocations.TryGetValue(region, out var cached)
+                ? cached.Select(l => l.Guid).ToHashSet()
+                : new HashSet<string>();
+            if (found.Any(l => !cachedGuids.Contains(l.Guid)))
+                lines.Add($"  {region}: {found.Count} location(s) — " +
+                          string.Join(", ", found.Select(l => $"{l.Name} ({l.Guid})")));
+
             Settings.RecordDiscoveredLocations(region, found);
             total += found.Count;
-            lines.Add($"  {region}: {found.Count} location(s) — " +
-                      string.Join(", ", found.Select(l => $"{l.Name} ({l.Guid})")));
         }
 
         var expected = new HashSet<EMapRegion>(Enum.GetValues<EMapRegion>());
@@ -402,8 +402,11 @@ internal static class DealListener
 
         _discoveredThisSession = true;
 
-        MelonLogger.Msg($"AAD: discovery walk — {regions.Count} region(s), {total} location(s).");
-        foreach (var line in lines) MelonLogger.Msg(line);
+        if (lines.Count > 0)
+        {
+            MelonLogger.Msg($"AAD: discovery walk — {total} location(s) across {regions.Count} region(s), new since last config write:");
+            foreach (var line in lines) MelonLogger.Msg(line);
+        }
     }
 
     private static void DiffAndWarn(EMapRegion region, List<DiscoveredLocation> found)
