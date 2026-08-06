@@ -28,7 +28,10 @@ internal sealed record PendingSend(
     string? LocationGuid,
     EDealWindow? Window,
     TimeMode TimeModeSnapshot,
-    Customer Customer);
+    Customer Customer,
+    string ProductId,
+    int Quantity,
+    float TotalPrice);
 
 [HarmonyPatch(typeof(Customer), nameof(Customer.OfferContract))]
 internal static class OfferContractPatch
@@ -136,7 +139,7 @@ internal static class DealListener
             _                  => null,
         };
 
-        var pending = new PendingSend(locationGuid, window, Settings.TimeMode, customer);
+        var pending = new PendingSend(locationGuid, window, Settings.TimeMode, customer, r.ProductId, p.Quantity, p.TotalPrice);
         _registry.Register(customer.Pointer, pending);
 
         // SendCounteroffer.price is total dollars — same semantics as EvaluateCounteroffer (confirmed Phase 6).
@@ -158,6 +161,11 @@ internal static class DealListener
 
             var name = customer.NPC?.FullName ?? "<unknown>";
 
+            // The game's own counter-offer round-trip doesn't reliably leave OfferedContractInfo
+            // holding the quantity/price we sent (observed in-game: customer order reverts to what
+            // they originally asked for) — force our countered values back onto it here.
+            ApplyCounterOfferValues(info, pending);
+
             // Apply window times to ContractInfo synchronously.
             if (pending.TimeModeSnapshot != TimeMode.WaitForPlayer && pending.Window.HasValue)
             {
@@ -172,7 +180,7 @@ internal static class DealListener
 
                 // PlayerAcceptedContract must be deferred — calling it synchronously inside
                 // OfferContract's call stack throws NullReferenceException in game code.
-                MelonCoroutines.Start(AcceptAfterDelay(customer, pending.Window.Value, pending.LocationGuid));
+                MelonCoroutines.Start(AcceptAfterDelay(customer, pending));
             }
 
             if (pending.TimeModeSnapshot == TimeMode.WaitForPlayer)
@@ -192,8 +200,11 @@ internal static class DealListener
         }
     }
 
-    private static IEnumerator AcceptAfterDelay(Customer customer, EDealWindow window, string? locationGuid)
+    private static IEnumerator AcceptAfterDelay(Customer customer, PendingSend pending)
     {
+        var window = pending.Window!.Value;
+        var locationGuid = pending.LocationGuid;
+
         // PlayerAcceptedContract needs ~6-10 frames after OfferContract returns for the game
         // to finish setting up its deal-scheduling state (observed in-game: succeeds by frame 10).
         for (int attempt = 0; attempt < 20; attempt++)
@@ -201,12 +212,14 @@ internal static class DealListener
             yield return null;
             try
             {
-                // Stamp location on OfferedContractInfo on every attempt — the game can reset
-                // DeliveryLocationGUID between frames, so we must re-apply each retry.
-                if (!string.IsNullOrEmpty(locationGuid))
+                // Re-stamp location and countered quantity/price on OfferedContractInfo on every
+                // attempt — the game can reset these fields between frames, so we must re-apply
+                // each retry rather than trusting the single application in HandleCounterOfferAccepted.
+                var offered = customer.OfferedContractInfo;
+                if (offered != null)
                 {
-                    var offered = customer.OfferedContractInfo;
-                    if (offered != null)
+                    ApplyCounterOfferValues(offered, pending);
+                    if (!string.IsNullOrEmpty(locationGuid))
                         offered.DeliveryLocationGUID = locationGuid;
                 }
 
@@ -227,6 +240,29 @@ internal static class DealListener
             }
         }
         MelonLogger.Error($"AAD: PlayerAcceptedContract still failing after 20 frames for {customer.NPC?.FullName ?? "?"}; giving up.");
+    }
+
+    // Forces the countered quantity/price back onto a ContractInfo. The game's counter-offer
+    // round-trip (SendCounteroffer -> ProcessCounterOfferServerSide -> re-offer) only carries
+    // productID/quantity/price as loose scalars over the RPC, not the ContractInfo we built —
+    // nothing guarantees the resulting OfferedContractInfo matches what we proposed, and in
+    // practice it can still hold the customer's original ask. Enforce it explicitly.
+    private static void ApplyCounterOfferValues(ContractInfo info, PendingSend pending)
+    {
+        info.Payment = pending.TotalPrice;
+
+        var entries = info.Products?.entries;
+        if (entries == null) return;
+
+        foreach (var entry in entries)
+        {
+            if (entry == null || entry.ProductID != pending.ProductId) continue;
+            entry.Quantity = pending.Quantity;
+            return;
+        }
+
+        MelonLogger.Warning(
+            $"AAD: ApplyCounterOfferValues — no entry for product '{pending.ProductId}' in ContractInfo; quantity not enforced.");
     }
 
     private static IEnumerator ApplyLocationWhenContractAssigned(Customer customer, string locationGuid)
