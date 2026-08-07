@@ -41,6 +41,24 @@ internal static class CounterOfferEngine
 
         var (total, strategy) = SearchByProbability(r.Customer, r.Product, effectiveQty, r.Quantity, r.Payment);
 
+        // Guards against sending a technically-100%-probability counter that isn't worth making.
+        // Compared per-unit rather than as a total-dollar bump — otherwise a rounding-inflated
+        // quantity can clear a total-price floor while the per-unit price actually drops (e.g.
+        // 90 for 2 units -> 105 for 5 units is +17% total but -53% per unit). Reject the deal
+        // (no counter sent) rather than chase margin the player wouldn't want anyway.
+        float origUnitPrice = r.Payment / Math.Max(1, r.Quantity);
+        float minUnitPrice = origUnitPrice * (1f + Settings.MinProfitPercent / 100f);
+        float minAcceptable = minUnitPrice * effectiveQty;
+        if (total < minAcceptable)
+        {
+            var name = r.Customer.NPC?.FullName ?? "<unknown>";
+            float bestUnitPrice = total / Math.Max(1, effectiveQty);
+            MelonLogger.Msg(
+                $"AAD: {name} — best counter for {r.ProductId}×{effectiveQty} only reaches {bestUnitPrice:F2}/unit " +
+                $"(need ≥{minUnitPrice:F2}/unit for {Settings.MinProfitPercent:F0}% min profit over {origUnitPrice:F2}/unit); declining, no counter sent.");
+            return false;
+        }
+
         float unit = total / Math.Max(1, effectiveQty);
         proposal = new CounterProposal(r.Product, effectiveQty, unit, total, strategy, r.Quantity);
         return true;
@@ -54,7 +72,12 @@ internal static class CounterOfferEngine
         var ctx = ProbabilityContext.Capture(customer, product, qty, origQty, floor);
         if (ctx == null) return (floor, "probability-no-context");
 
-        int ceiling = (int)Math.Floor(ctx.SpendingLimit) - 1;
+        // SpendingLimit is a heuristic reimplementation of the game's real (unknown) limit, and it
+        // can be too generous — the bisection below then finds a price it believes is a guaranteed
+        // accept, but the real game rejects it outright. Stay clear of the modeled edge by a
+        // configurable margin instead of searching right up to it.
+        float safeLimit = ctx.SpendingLimit * (Settings.SpendingLimitSafetyMarginPercent / 100f);
+        int ceiling = (int)Math.Floor(safeLimit) - 1;
         int floorInt = (int)Math.Ceiling(floor);
         if (ceiling <= floorInt) return (floor, "probability-floor-at-limit");
 

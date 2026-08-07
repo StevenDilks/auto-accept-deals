@@ -182,9 +182,11 @@ internal static class SettingsPanel
 
         DrawRoundingSection();
         GUILayout.Space(8f);
-        DrawLocationSection();
+        DrawProfitSection();
         GUILayout.Space(8f);
         DrawTimeSection();
+        GUILayout.Space(8f);
+        DrawLocationSection();
 
         GUILayout.EndScrollView();
     }
@@ -203,6 +205,29 @@ internal static class SettingsPanel
         {
             if (Settings.RoundingMultiple != 0) Settings.SetRoundingMultiple(0);
         }
+        GUILayout.EndHorizontal();
+    }
+
+    private static void DrawProfitSection()
+    {
+        GUILayout.Label($"Min profit: {Settings.MinProfitPercent:F0}%   (required per-unit price increase over the customer's ask; decline instead of countering below this)");
+        GUILayout.BeginHorizontal();
+        GUILayout.Space(20f);
+        if (GUILayout.Button("-5", GUILayout.Width(40f))) AdjustMinProfit(-5f);
+        if (GUILayout.Button("-1", GUILayout.Width(40f))) AdjustMinProfit(-1f);
+        if (GUILayout.Button("+1", GUILayout.Width(40f))) AdjustMinProfit(+1f);
+        if (GUILayout.Button("+5", GUILayout.Width(40f))) AdjustMinProfit(+5f);
+        GUILayout.EndHorizontal();
+
+        GUILayout.Label($"Spending limit safety margin: {Settings.SpendingLimitSafetyMarginPercent:F0}%   " +
+                        "(we estimate what a customer can afford, then only propose prices within this % of " +
+                        "that estimate — lower values leave more buffer in case the estimate runs high)");
+        GUILayout.BeginHorizontal();
+        GUILayout.Space(20f);
+        if (GUILayout.Button("-5", GUILayout.Width(40f))) AdjustSafetyMargin(-5f);
+        if (GUILayout.Button("-1", GUILayout.Width(40f))) AdjustSafetyMargin(-1f);
+        if (GUILayout.Button("+1", GUILayout.Width(40f))) AdjustSafetyMargin(+1f);
+        if (GUILayout.Button("+5", GUILayout.Width(40f))) AdjustSafetyMargin(+5f);
         GUILayout.EndHorizontal();
     }
 
@@ -400,6 +425,20 @@ internal static class SettingsPanel
     {
         var v = Math.Max(0, Settings.RoundingMultiple + delta);
         if (v != Settings.RoundingMultiple) Settings.SetRoundingMultiple(v);
+    }
+
+    private static void AdjustMinProfit(float delta)
+    {
+        // Settings.SetMinProfitPercent requires > -100 (see its comment); clamp just above that
+        // so repeated -5/-1 clicks can't throw.
+        var v = Math.Max(-99f, Settings.MinProfitPercent + delta);
+        if (v != Settings.MinProfitPercent) Settings.SetMinProfitPercent(v);
+    }
+
+    private static void AdjustSafetyMargin(float delta)
+    {
+        var v = Mathf.Clamp(Settings.SpendingLimitSafetyMarginPercent + delta, 1f, 100f);
+        if (v != Settings.SpendingLimitSafetyMarginPercent) Settings.SetSpendingLimitSafetyMarginPercent(v);
     }
 
     private static void DrawDiscoveryHint(string text)

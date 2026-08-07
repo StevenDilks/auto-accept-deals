@@ -31,7 +31,12 @@ internal sealed record PendingSend(
     Customer Customer,
     string ProductId,
     int Quantity,
-    float TotalPrice);
+    float TotalPrice,
+    EQuality Quality,
+    int OriginalQuantity,
+    float OrigPayment,
+    string Strategy,
+    string Region);
 
 [HarmonyPatch(typeof(Customer), nameof(Customer.OfferContract))]
 internal static class OfferContractPatch
@@ -53,11 +58,6 @@ internal static class DealListener
     private const float DuplicateWindowSeconds = 0.5f;
 
     private static readonly PendingSendRegistry<PendingSend> _registry = new();
-
-    // Set by HandleCounterOfferAccepted, which fires synchronously nested inside the
-    // customer.SendCounteroffer(...) call below — consumed there to fold the outcome
-    // into a single log line instead of a separate one.
-    private static string? _lastOutcome;
 
     public static void HandleOffer(Customer customer, ContractInfo info)
     {
@@ -133,25 +133,60 @@ internal static class DealListener
             _                  => null,
         };
 
-        var pending = new PendingSend(locationGuid, window, Settings.TimeMode, customer, r.ProductId, p.Quantity, p.TotalPrice);
+        var pending = new PendingSend(
+            locationGuid, window, Settings.TimeMode, customer, r.ProductId, p.Quantity, p.TotalPrice,
+            r.Quality, p.OriginalQuantity, r.Payment, p.Strategy, region);
         _registry.Register(customer.Pointer, pending);
 
-        _lastOutcome = null;
         // SendCounteroffer.price is total dollars — same semantics as EvaluateCounteroffer (confirmed Phase 6).
         customer.SendCounteroffer(p.Product, p.Quantity, p.TotalPrice);
 
-        var windowStr = Settings.TimeMode == TimeMode.WaitForPlayer
-            ? "player-chosen"
-            : (window.HasValue ? window.Value.ToString() : "none");
+        // If HandleCounterOfferAccepted already fired synchronously (nested inside the call above),
+        // the registry entry is gone and it has already logged the outcome itself — nothing more to do.
+        if (!_registry.HasPending(customer.Pointer)) return;
 
-        MelonLogger.Msg(
-            $"AAD: {name} — {r.ProductId}×{p.OriginalQuantity}→{p.Quantity} ({r.Quality}), " +
-            $"payment {r.Payment:F0}→{p.TotalPrice:F0} ({p.Strategy}), region={region}, " +
-            $"location={locationGuid ?? "default"}, window={windowStr} → {_lastOutcome ?? "no confirmation"}.");
+        // Not resolved synchronously. Observed in-game: the game's OfferContract callback can still
+        // arrive on a later frame (async round-trip) rather than nested in this call stack — give it
+        // time before concluding it was rejected outright, instead of declaring "rejected" prematurely.
+        MelonCoroutines.Start(WaitForAsyncOutcome(customer, r, p));
     }
 
-    // Called when OfferContract fires and the registry has a pending entry for this customer —
-    // the game calls OfferContract synchronously inside SendCounteroffer (IsCounterOffer=false).
+    // Only reached when HandleCounterOfferAccepted didn't fire synchronously inside SendCounteroffer.
+    // Waits several frames for a delayed OfferContract callback before declaring a genuine rejection.
+    private static IEnumerator WaitForAsyncOutcome(Customer customer, DealRequest r, CounterProposal p)
+    {
+        for (int frame = 0; frame < 60; frame++)
+        {
+            yield return null;
+            if (!_registry.HasPending(customer.Pointer))
+                yield break; // HandleCounterOfferAccepted fired asynchronously and already logged the outcome
+        }
+
+        var pending = _registry.TakeForKey(customer.Pointer);
+        if (pending == null) yield break; // resolved in the same frame we gave up on
+
+        var name = customer.NPC?.FullName ?? "<unknown>";
+        MelonLogger.Warning(
+            $"AAD: {name} — counter-offer for {r.ProductId}×{p.Quantity} at {p.TotalPrice:F0} was rejected outright by the game " +
+            "(no OfferContract callback came back after waiting); the probability model likely overestimated this customer's spending limit.");
+        LogOutcome(pending, "rejected");
+    }
+
+    private static void LogOutcome(PendingSend pending, string outcome)
+    {
+        var name = pending.Customer.NPC?.FullName ?? "<unknown>";
+        var windowStr = pending.TimeModeSnapshot == TimeMode.WaitForPlayer
+            ? "player-chosen"
+            : (pending.Window.HasValue ? pending.Window.Value.ToString() : "none");
+        MelonLogger.Msg(
+            $"AAD: {name} — {pending.ProductId}×{pending.OriginalQuantity}→{pending.Quantity} ({pending.Quality}), " +
+            $"payment {pending.OrigPayment:F0}→{pending.TotalPrice:F0} ({pending.Strategy}), region={pending.Region}, " +
+            $"location={pending.LocationGuid ?? "default"}, window={windowStr} → {outcome}.");
+    }
+
+    // Called when OfferContract fires and the registry has a pending entry for this customer.
+    // Usually nested synchronously inside SendCounteroffer (IsCounterOffer=false), but can also
+    // fire asynchronously on a later frame — see WaitForAsyncOutcome, which covers that case.
     private static void HandleCounterOfferAccepted(Customer customer, ContractInfo info)
     {
         try
@@ -165,6 +200,7 @@ internal static class DealListener
             ApplyCounterOfferValues(info, pending);
 
             // Apply window times to ContractInfo synchronously.
+            string outcome;
             if (pending.TimeModeSnapshot != TimeMode.WaitForPlayer && pending.Window.HasValue)
             {
                 var wi = DealWindowInfo.GetWindowInfo(pending.Window.Value);
@@ -179,13 +215,16 @@ internal static class DealListener
                 // PlayerAcceptedContract must be deferred — calling it synchronously inside
                 // OfferContract's call stack throws NullReferenceException in game code.
                 MelonCoroutines.Start(AcceptAfterDelay(customer, pending));
+                outcome = "accepted";
+            }
+            else
+            {
+                outcome = "awaiting player scheduling";
             }
 
-            // Fed back into the single consolidated log line in SendCounterOffer, which is
-            // still on the stack above us (see comment on _lastOutcome).
-            _lastOutcome = pending.TimeModeSnapshot == TimeMode.WaitForPlayer
-                ? "awaiting player scheduling"
-                : "accepted";
+            // Logged here (rather than back in SendCounterOffer) because this callback can fire
+            // asynchronously on a later frame, well after SendCounterOffer has already returned.
+            LogOutcome(pending, outcome);
         }
         catch (Exception ex)
         {
