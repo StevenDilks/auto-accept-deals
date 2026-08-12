@@ -12,7 +12,7 @@ public class QuantitySearchTests
     [Fact]
     public void FindBest_UnitPriceClimbsToBoundary_PicksLastFeasibleCandidate()
     {
-        // Unit price rises with each step: 11, 12, 13/unit.
+        // Unit price rises with each step: 11, 12, 13/unit — each clears the 2% displacement margin.
         var curve = Curve(new() { [10] = 110f, [15] = 180f, [20] = 260f }); // 25 -> infeasible, cap stops the climb there
         var result = QuantitySearch.FindBest(startQty: 10, multiple: 5, cap: 25, minUnitPrice: 0f, priceCeiling: float.MaxValue, curve);
 
@@ -45,6 +45,20 @@ public class QuantitySearchTests
         Assert.True(result.Found);
         Assert.Equal(10, result.Quantity);
         Assert.Equal(500f, result.TotalPrice);
+    }
+
+    // Reproduces a second scenario from review feedback: a larger quantity clears a *nominally*
+    // higher unit price, but the gain is a rounding error ($0.02/unit) that doesn't justify a 5x
+    // larger order. MinImprovementRatio exists precisely to reject this.
+    [Fact]
+    public void FindBest_ImmaterialUnitPriceGain_DoesNotDisplaceIncumbent()
+    {
+        var curve = Curve(new() { [10] = 330f, [50] = 1651f }); // 33.00/unit vs 33.02/unit
+        var result = QuantitySearch.FindBest(startQty: 10, multiple: 40, cap: 50, minUnitPrice: 33f, priceCeiling: float.MaxValue, curve);
+
+        Assert.True(result.Found);
+        Assert.Equal(10, result.Quantity);
+        Assert.Equal(330f, result.TotalPrice);
     }
 
     [Fact]
@@ -93,13 +107,18 @@ public class QuantitySearchTests
         Assert.Equal(QuantitySearch.CandidateOutcome.BelowMinProfit, result.Trace[0].Outcome);
         Assert.Equal(QuantitySearch.CandidateOutcome.BelowMinProfit, result.Trace[1].Outcome);
         Assert.Equal(QuantitySearch.CandidateOutcome.Infeasible, result.Trace[2].Outcome);
+
+        // 10.00/unit (qty10) beats 9.33/unit (qty15) -- BestBelowMinProfit reports the better of
+        // the two BelowMinProfit candidates, not just the first one.
+        Assert.NotNull(result.BestBelowMinProfit);
+        Assert.Equal(10, result.BestBelowMinProfit!.Value.Quantity);
     }
 
     [Fact]
     public void FindBest_MidRunBelowMinProfitThenLaterClears_LaterCandidateWins()
     {
         // minUnitPrice=10 -> qty10 needs >=100 (ok, 10.00/u), qty15 needs >=150 (fails, total=140),
-        // qty20 needs >=200 (ok, total=220, 11.00/u > floor's 10.00/u).
+        // qty20 needs >=200 (ok, total=220, 11.00/u > floor's 10.00/u by more than the 2% margin).
         var curve = Curve(new() { [10] = 100f, [15] = 140f, [20] = 220f }); // 25 -> infeasible
         var result = QuantitySearch.FindBest(startQty: 10, multiple: 5, cap: 20, minUnitPrice: 10f, priceCeiling: float.MaxValue, curve);
 
@@ -154,13 +173,28 @@ public class QuantitySearchTests
 
         Assert.False(result.Found);
         Assert.Empty(result.Trace);
+        Assert.Null(result.BestBelowMinProfit);
+        Assert.False(result.Truncated);
+    }
+
+    // startQty above cap is the one degenerate input the other guards don't otherwise cover — the
+    // first candidate is evaluated before any cap check runs, so without this, FindBest could
+    // return a quantity above its own advertised cap.
+    [Fact]
+    public void FindBest_StartQtyAboveCap_ReturnsNotFoundImmediately()
+    {
+        var result = QuantitySearch.FindBest(startQty: 1500, multiple: 5, cap: 1000, minUnitPrice: 0f, priceCeiling: float.MaxValue, _ => 100f);
+
+        Assert.False(result.Found);
+        Assert.Empty(result.Trace);
     }
 
     [Fact]
     public void FindBest_NeverProposesQuantityAboveCapOrOffTheRoundingGrid()
     {
-        // Unit price strictly increases toward the cap so the cap itself is the genuine winner.
-        var curve = Curve(new() { [990] = 9900f, [995] = 9955f, [1000] = 10050f }); // 1005 would exceed cap
+        // Unit price rises with each step (10.0, 10.5, 11.0 -- each clearing the 2% margin) so the
+        // cap itself is the genuine winner, not just the last candidate evaluated.
+        var curve = Curve(new() { [990] = 9900f, [995] = 10447.5f, [1000] = 11000f }); // 1005 would exceed cap
         var result = QuantitySearch.FindBest(startQty: 990, multiple: 5, cap: 1000, minUnitPrice: 0f, priceCeiling: float.MaxValue, curve);
 
         Assert.True(result.Found);
@@ -178,25 +212,45 @@ public class QuantitySearchTests
         Assert.Equal(new[] { 10, 15, 20, 25 }, System.Linq.Enumerable.Select(result.Trace, c => c.Quantity));
     }
 
-    // The exact, cheap bound: once minUnitPrice * qty exceeds the highest price `evaluate` could
-    // ever return, every remaining candidate is provably BelowMinProfit — no point evaluating them.
+    // The exact bound before any Feasible candidate exists: `found` stays false the whole climb
+    // (every candidate is BelowMinProfit), so the bound stays anchored to minUnitPrice throughout.
     [Fact]
-    public void FindBest_PriceCeilingBound_StopsOnceMinUnitPriceTimesQtyExceedsCeiling()
+    public void FindBest_PriceCeilingBound_BeforeAnyFeasibleCandidate_UsesMinUnitPrice()
     {
-        // evaluate never returns null (mirrors a qty-insensitive probability formula) -- only the
-        // priceCeiling bound can stop this climb.
+        // Contract-respecting: evaluate can never return more than priceCeiling (250).
         var result = QuantitySearch.FindBest(
             startQty: 10, multiple: 5, cap: 1000, minUnitPrice: 10f, priceCeiling: 250f,
-            evaluate: qty => qty * 10.5f);
+            evaluate: qty => System.MathF.Min(250f, qty * 9f)); // always below the 10/unit floor
 
         // 10*25=250 (not > 250, still evaluated); 10*30=300 (> 250, stop before evaluating).
+        Assert.False(result.Found);
         Assert.Equal(4, result.Trace.Count);
         Assert.Equal(25, result.Trace[^1].Quantity);
     }
 
+    // Once an incumbent exists, the bound tightens against it (bestUnitPrice * MinImprovementRatio)
+    // instead of staying anchored to the looser minUnitPrice floor. Every candidate here sits at
+    // the same 10.5/unit rate, so none clears the 2% margin needed to displace qty=10 -- the climb
+    // should stop well short of where the minUnitPrice-anchored bound would (qty=30, per the test
+    // above), since nothing beyond qty=10 can possibly win once that incumbent is in place.
+    [Fact]
+    public void FindBest_PriceCeilingBound_OnceFound_TightensAgainstIncumbent()
+    {
+        var result = QuantitySearch.FindBest(
+            startQty: 10, multiple: 5, cap: 1000, minUnitPrice: 10f, priceCeiling: 250f,
+            evaluate: qty => System.MathF.Min(250f, qty * 10.5f));
+
+        Assert.True(result.Found);
+        Assert.Equal(10, result.Quantity);
+        Assert.Equal(105f, result.TotalPrice);
+        Assert.Equal(3, result.Trace.Count);
+        Assert.Equal(20, result.Trace[^1].Quantity);
+    }
+
     // Coverage for the runaway case: an `evaluate` that never returns null (several early-exit
     // paths in ProbabilityFormula.Compute behave exactly this way) and a degenerate minUnitPrice
-    // that disables the priceCeiling bound must still terminate, via MaxCandidates.
+    // that disables the priceCeiling bound must still terminate, via MaxCandidates -- and the
+    // result must say so, since the trace otherwise can't be told apart from a completed search.
     [Fact]
     public void FindBest_EvaluateNeverReturnsNull_BoundedByMaxCandidates()
     {
@@ -206,5 +260,6 @@ public class QuantitySearchTests
 
         Assert.Equal(QuantitySearch.MaxCandidates, result.Trace.Count);
         Assert.All(result.Trace, c => Assert.Equal(QuantitySearch.CandidateOutcome.Feasible, c.Outcome));
+        Assert.True(result.Truncated);
     }
 }

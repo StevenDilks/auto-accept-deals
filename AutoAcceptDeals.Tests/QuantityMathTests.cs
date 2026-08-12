@@ -35,4 +35,16 @@ public class QuantityMathTests
     [InlineData(2000, 1000, 1000)]
     public void Clamp_HoldsAtCap(int v, int max, int expected)
         => Assert.Equal(expected, QuantityMath.Clamp(v, max));
+
+    // PR #14 review: RoundUpToMultiple computes v + multiple - 1, which overflows to a negative
+    // result for a large enough multiple — an unbounded RoundingMultiple setting could feed a
+    // negative "rounded" quantity straight into the quantity-search loop. Settings now clamps
+    // RoundingMultiple to [0, QuantityCap]; this pins that QuantityCap itself never triggers the
+    // overflow, for any v within the same bound.
+    [Fact]
+    public void RoundUpToMultiple_NeverOverflows_ForMultipleWithinQuantityCap()
+    {
+        int result = QuantityMath.RoundUpToMultiple(QuantityMath.QuantityCap, QuantityMath.QuantityCap);
+        Assert.True(result > 0, $"Expected a positive rounded quantity, got {result}");
+    }
 }

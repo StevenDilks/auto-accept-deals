@@ -108,23 +108,34 @@ public class ProbabilityFormulaTests
         Assert.True(pAt >= pAbove, $"Expected peak at origQty: pAt={pAt} should be >= pAbove={pAbove}");
     }
 
-    // Demonstrates the real non-monotonicity: a quantity CLOSER to origQty (so num5 is higher) can
-    // still be infeasible, while a FARTHER quantity (lower num5) is feasible, because vp2 rose
-    // enough to compensate. QuantitySearch.FindBest relies on exactly this — it treats an
-    // Infeasible reading as skip-and-continue rather than a hard stop.
+    // Demonstrates the real non-monotonicity, with a much more conservative vp2 coupling than an
+    // earlier version of this test used. In the engine, vp2 = Customer.GetValueProposition(product,
+    // price/qty), so moving qty 28 -> 40 (+42.9%) at a fixed price lowers price/qty by ~28.6%; the
+    // two values below move vp2 30 -> 43 (+43.3%), i.e. assume roughly unit elasticity between a
+    // price/qty change and GetValueProposition's response — not the ~14.7x-elasticity, 367% jump
+    // (vp2 0.15 -> 0.70 for a mere +25% qty change) the previous version of this test relied on,
+    // which the engine's own coupling almost certainly can't produce.
+    //
+    // Rather than lean on the vp2*num5>vp0 shortcut again (which needs a large absolute vp2 to
+    // begin with), this drives the crossing through the num9<=num11 branch cliff instead — per
+    // review feedback, a hard threshold that only needs a modest vp2 delta to cross is a more
+    // defensible source of non-monotonicity than asserting a specific vp2 magnitude.
+    // maxAddictionRelation=0.9 is a high but valid value (it's a max() of two already-normalized
+    // inputs), giving num11 = 0.18 for both calls.
     [Fact]
     public void QuantityAndValueProposition_NonMonotonic_NearerQtyCanBeInfeasibleWhileFartherQtyIsFeasible()
     {
         const int origQty = 25;
 
-        // qty=28 is close to origQty (num5 ~0.93) but modeled with a low vp2, as if price/qty were
-        // still relatively expensive at this quantity -> well below the p>=1 threshold.
-        float pNearer = ProbabilityFormula.Compute(500f, 1000f, vp0: 0.5f, vp2: 0.15f, productEnjoyment: 0.5f, qty: 28, origQty, maxAddictionRelation: 0f);
+        // qty=28 is close to origQty (num5 ~0.930): num9 ~0.204, just above num11 (0.18) -> falls
+        // through to the continuous path at p ~0.973 -- below the p>=1.0 threshold BisectBestPrice
+        // requires, by a comfortable margin.
+        float pNearer = ProbabilityFormula.Compute(500f, 1000f, vp0: 0.5f, vp2: 0.30f, productEnjoyment: 0.5f, qty: 28, origQty, maxAddictionRelation: 0.9f);
 
-        // qty=35 is farther from origQty (num5 ~0.78, lower than at qty=28) but modeled with a
-        // high vp2, as if price/qty were cheaper at this larger quantity -> hits the vp2*num5>vp0
-        // shortcut and returns 1f outright.
-        float pFarther = ProbabilityFormula.Compute(500f, 1000f, vp0: 0.5f, vp2: 0.70f, productEnjoyment: 0.5f, qty: 35, origQty, maxAddictionRelation: 0f);
+        // qty=40 is farther from origQty (num5 ~0.674, lower than at qty=28): the higher vp2 pulls
+        // num9 down to ~0.163, at or below num11 (0.18) -> hits the num9<=num11 shortcut and
+        // returns 1f outright, with a comfortable margin on the threshold too.
+        float pFarther = ProbabilityFormula.Compute(500f, 1000f, vp0: 0.5f, vp2: 0.43f, productEnjoyment: 0.5f, qty: 40, origQty, maxAddictionRelation: 0.9f);
 
         Assert.True(pNearer < 1f, $"Expected the nearer qty to be infeasible at this vp2, got {pNearer}");
         Assert.Equal(1f, pFarther);
