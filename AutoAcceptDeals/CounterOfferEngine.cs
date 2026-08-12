@@ -14,6 +14,17 @@ internal sealed record CounterProposal(
     string Strategy,
     int OriginalQuantity);
 
+// Distinguishes "we evaluated this deal and it genuinely doesn't clear the min-profit floor"
+// from "we couldn't evaluate it at all" (missing customer/relation data, or a degenerate search
+// range). Only the former is a real "this deal is unprofitable" verdict — callers should not
+// auto-decline on the latter, since that would permanently reject a deal over a transient
+// data hiccup rather than an actual pricing judgment.
+internal enum CounterOfferFailureReason
+{
+    CouldNotEvaluate,
+    NoProfitableCounterFound,
+}
+
 internal static class CounterOfferEngine
 {
     private const int QuantityCap = 1000; // Customer.MaxOrderQuantityPerProduct
@@ -24,9 +35,11 @@ internal static class CounterOfferEngine
     // the bisect loop with a deterministic probability reimplementation ported from
     // BetterCounterOfferUI 3.3.0 (OverweightUnicorn), which uses only public game APIs.
 
-    public static bool TryPropose(DealRequest r, out CounterProposal proposal)
+    public static bool TryPropose(DealRequest r, out CounterProposal proposal, out CounterOfferFailureReason reason)
     {
         proposal = null!;
+        reason = CounterOfferFailureReason.CouldNotEvaluate;
+
         if (r.Product == null)
         {
             MelonLogger.Warning(
@@ -40,6 +53,13 @@ internal static class CounterOfferEngine
         var effectiveQty = QuantityMath.Clamp(rounded, QuantityCap);
 
         var (total, strategy) = SearchByProbability(r.Customer, r.Product, effectiveQty, r.Quantity, r.Payment);
+
+        // Only "probability" means the search actually ran against valid customer/relation data
+        // and produced a price. The other strategies ("probability-no-context",
+        // "probability-floor-at-limit", "probability-no-accept") are all evaluation failures —
+        // missing data or a degenerate search range — not a verdict that the deal is unprofitable.
+        if (strategy != "probability")
+            return false;
 
         // Guards against sending a technically-100%-probability counter that isn't worth making.
         // Compared per-unit rather than as a total-dollar bump — otherwise a rounding-inflated
@@ -56,6 +76,7 @@ internal static class CounterOfferEngine
             MelonLogger.Msg(
                 $"AAD: {name} — best counter for {r.ProductId}×{effectiveQty} only reaches {bestUnitPrice:F2}/unit " +
                 $"(need ≥{minUnitPrice:F2}/unit for {Settings.MinProfitPercent:F0}% min profit over {origUnitPrice:F2}/unit); declining, no counter sent.");
+            reason = CounterOfferFailureReason.NoProfitableCounterFound;
             return false;
         }
 

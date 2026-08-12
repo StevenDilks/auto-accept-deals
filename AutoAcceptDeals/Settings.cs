@@ -196,8 +196,22 @@ internal static class Settings
 
     public static void RecordDiscoveredLocations(EMapRegion r, IEnumerable<DiscoveredLocation> locs)
     {
-        _discoveredLocations[r] = locs.ToArray();
+        var updated = locs.ToArray();
+        // Called once per region on every scene entry — skip the write + File.Move when nothing
+        // actually changed instead of rewriting the full settings file every time.
+        if (_discoveredLocations.TryGetValue(r, out var existing) && SameLocations(existing, updated))
+            return;
+
+        _discoveredLocations[r] = updated;
         TryPersist();
+    }
+
+    private static bool SameLocations(IReadOnlyList<DiscoveredLocation> a, IReadOnlyList<DiscoveredLocation> b)
+    {
+        if (a.Count != b.Count) return false;
+        for (int i = 0; i < a.Count; i++)
+            if (a[i].Name != b[i].Name || a[i].Guid != b[i].Guid) return false;
+        return true;
     }
 
     private static void ApplyDefaults()

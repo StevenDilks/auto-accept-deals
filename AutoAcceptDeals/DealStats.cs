@@ -45,10 +45,17 @@ internal static class DealStats
 
     // Forces the next EnsureCurrentDay call to reseed rather than compare against a stale day
     // number left over from a previous save (e.g. loading a different save with a lower ElapsedDays).
+    // Also zeroes the counters themselves — this class is documented in-memory/session-scoped, and
+    // without this, loading a different save after playing save A would keep showing save A's
+    // deals-made/declined and margins on the F8 panel until save B's next day rollover.
     public static void ResetForSceneLeave()
     {
         _lastElapsedDays = -1;
         _pendingWakeReset = false;
+        DealsMade = 0;
+        DealsDeclined = 0;
+        _marginSum = 0f;
+        _marginCount = 0;
     }
 
     // Cheap poll instead of subscribing to TimeManager.onDayPass — avoids subscribe/unsubscribe
@@ -58,10 +65,13 @@ internal static class DealStats
     //
     // ElapsedDays alone isn't the right reset trigger: it bumps whenever the player's sleep happens
     // to complete, which can be any real moment (observed: as late as noon) — not a fixed clock
-    // time. The in-game day actually runs until 4 AM, so the 00:00-06:00 stretch still belongs to
-    // the day that's ending; the new business day only starts once the clock reaches WakeTime
-    // (6 AM). So: flag a pending reset the moment ElapsedDays changes, then only apply it once
-    // CurrentTime has actually reached WakeTime.
+    // time. The in-game day actually runs until 4 AM, so the 00:00-06:59 stretch still belongs to
+    // the day that's ending; the new business day only starts once the clock reaches
+    // TimeManager.WakeTime (07:00). So: flag a pending reset the moment ElapsedDays changes, then
+    // only apply it once CurrentTime has actually reached WakeTime. If the tick is only observed
+    // after WakeTime has already passed (e.g. the mod wasn't ticking during a sleep cutscene), the
+    // gate is already satisfied on that same frame and the reset fires immediately rather than
+    // waiting for the following day — there's no earlier WakeTime crossing left to catch.
     public static void EnsureCurrentDay()
     {
         if (!TimeManager.InstanceExists) return;

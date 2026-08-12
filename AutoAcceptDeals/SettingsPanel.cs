@@ -201,8 +201,11 @@ internal static class SettingsPanel
 
     private static void DrawStatsPanel()
     {
-        DealStats.EnsureCurrentDay();
-
+        // No EnsureCurrentDay() call here: Mod.OnUpdate already calls it every frame the mod is
+        // active, so the day is always current by the time OnGUI runs. Calling a mutating,
+        // logging method from the draw path would be a no-op at best — at worst it fires the
+        // reset between OnGUI's Layout and Repaint passes of the same frame, zeroing the counters
+        // the Layout pass already measured.
         var successRate = DealStats.SuccessRatePercent;
         var lines = new[]
         {

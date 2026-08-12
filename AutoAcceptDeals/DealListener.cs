@@ -107,10 +107,27 @@ internal static class DealListener
 
     private static void ProcessRequest(DealRequest r)
     {
-        if (!CounterOfferEngine.TryPropose(r, out var p))
+        if (!CounterOfferEngine.TryPropose(r, out var p, out var reason))
         {
-            if (Settings.AutoDeclineUncounterableDeals)
-                MelonCoroutines.Start(AutoDeclineAfterDelay(r.Customer));
+            // Only a genuine "no counter clears the min profit floor" verdict counts as a decline —
+            // an evaluation failure (missing customer/relation data, degenerate search range) isn't
+            // a pricing judgment, so recording it as declined or auto-rejecting it would punish the
+            // customer for a transient mod-internal hiccup rather than an actual unprofitable deal.
+            if (reason == CounterOfferFailureReason.NoProfitableCounterFound)
+            {
+                // Recorded here, at the moment the decision is made, rather than inside
+                // AutoDeclineAfterDelay — that way the stat reflects every deal the engine actually
+                // rejected, even when AutoDeclineUncounterableDeals is off and nothing ever clicks
+                // the decline button.
+                DealStats.RecordDealDeclined();
+                if (Settings.AutoDeclineUncounterableDeals)
+                    MelonCoroutines.Start(AutoDeclineAfterDelay(r.Customer));
+            }
+            else
+            {
+                var name = r.Customer.NPC?.FullName ?? "<unknown>";
+                MelonLogger.Warning($"AAD: {name} — could not evaluate a counter-offer (missing data); leaving unanswered rather than declining.");
+            }
             return;
         }
         SendCounterOffer(r, p);
@@ -128,13 +145,6 @@ internal static class DealListener
     // actually runs when the player clicks a button. ResponseChosen internally invokes the
     // response's own callback (ContractRejected for reject), so this replaces — not supplements —
     // the direct ContractRejected() call.
-    //
-    // The accept/reject button captions are NPC-personality flavor text that varies per customer
-    // (observed: "Sure thing"/"No" for one customer, "Yes"/"Not right now" for another) — they
-    // can't be matched by string. Button ORDER is what's stable: Accept, then the literal
-    // "[Counter-offer]", then Reject last. So take the last response, unless it turns out to BE
-    // "[Counter-offer]" (this contract didn't offer a reject option) — then there's nothing valid
-    // to click, so fall back to calling ContractRejected() directly.
     private static IEnumerator AutoDeclineAfterDelay(Customer customer)
     {
         var name = customer.NPC?.FullName ?? "<unknown>";
@@ -144,27 +154,28 @@ internal static class DealListener
             try
             {
                 var conversation = MessagingManager.InstanceExists ? MessagingManager.Instance.GetConversation(customer.NPC) : null;
-                var responses = conversation?.currentResponses;
-                var declineResponse = (responses != null && responses.Count > 0) ? responses[responses.Count - 1] : null;
+                var declineResponse = FindDeclineResponse(conversation?.currentResponses);
 
-                if (conversation != null && declineResponse != null && declineResponse.label != "[Counter-offer]")
+                if (conversation != null && declineResponse != null)
                 {
                     conversation.ResponseChosen(declineResponse, true);
                 }
                 else if (attempt == 19)
                 {
-                    // Never saw a usable reject response after 20 frames — fall back so the deal
-                    // doesn't go completely unanswered. This won't clear the UI buttons (the whole
-                    // reason for the ResponseChosen path above), but it's better than nothing.
+                    // Never positively identified a reject response after 20 frames — fall back so
+                    // the deal doesn't go completely unanswered. This won't clear the UI buttons
+                    // (the whole reason for the ResponseChosen path above), but it's better than
+                    // nothing, and — critically — it can never click Accept by mistake.
                     customer.ContractRejected();
                 }
                 else
                 {
                     // Buttons haven't populated yet (currentResponses lags a frame or more behind
-                    // the offer) — this used to fall straight into the ContractRejected() fallback
-                    // on attempt 0, which skipped the retry loop entirely and left the real buttons
-                    // dangling (customer eventually gives up on their own and sends "nvm"). Retry
-                    // instead of settling for the broken fallback prematurely.
+                    // the offer), or this contract's response set doesn't match the shape
+                    // FindDeclineResponse can positively identify (e.g. built with
+                    // canCounterOffer:false). Retry rather than guessing — clicking the wrong
+                    // response here means signing the player up for a deal the engine just judged
+                    // unprofitable.
                     continue;
                 }
 
@@ -186,10 +197,32 @@ internal static class DealListener
                 continue;
             }
 
-            DealStats.RecordDealDeclined();
             MelonLogger.Msg($"AAD: {name} — no viable counter; auto-declined so it doesn't sit unanswered.");
             yield break;
         }
+    }
+
+    // Positively identifies the reject response instead of trusting "whatever is last in the
+    // list" — a short currentResponses list (mid-population, or an offer built with
+    // canReject:false / canCounterOffer:false) would otherwise put the *accept* response in the
+    // last slot, and clicking that signs the player up for the exact deal the engine just judged
+    // unprofitable. Accept/Reject button captions are NPC-personality flavor text and can't be
+    // matched by string, but "[Counter-offer]" is observed stable across customers — so the
+    // reject response is identified structurally as the entry immediately after it, and only
+    // when that's also the last entry (the documented Accept, Counter-offer, Reject order). Any
+    // other shape returns null rather than guess.
+    private static Response? FindDeclineResponse(Il2CppSystem.Collections.Generic.List<Response>? responses)
+    {
+        if (responses == null || responses.Count < 2) return null;
+
+        int counterIdx = -1;
+        for (int i = 0; i < responses.Count; i++)
+        {
+            if (responses[i]?.label == "[Counter-offer]") { counterIdx = i; break; }
+        }
+        if (counterIdx < 0 || counterIdx != responses.Count - 2) return null;
+
+        return responses[counterIdx + 1];
     }
 
     private static void SendCounterOffer(DealRequest r, CounterProposal p)
@@ -220,8 +253,22 @@ internal static class DealListener
             r.Quality, p.OriginalQuantity, r.Payment, p.Strategy, region);
         _registry.Register(customer.Pointer, pending);
 
-        // SendCounteroffer.price is total dollars — same semantics as EvaluateCounteroffer (confirmed Phase 6).
-        customer.SendCounteroffer(p.Product, p.Quantity, p.TotalPrice);
+        try
+        {
+            // SendCounteroffer.price is total dollars — same semantics as EvaluateCounteroffer (confirmed Phase 6).
+            customer.SendCounteroffer(p.Product, p.Quantity, p.TotalPrice);
+        }
+        catch (Exception ex)
+        {
+            // If this throws (IL2CPP null, network not ready), HandleCounterOfferAccepted never ran
+            // and the registry entry above would otherwise leak — worse, it would still be sitting
+            // there as "pending" the next time this customer makes a genuine offer, which would
+            // then get misrouted into HandleCounterOfferAccepted and stamped with these stale
+            // values. Clear it out before anything else can observe it.
+            _registry.TakeForKey(customer.Pointer);
+            MelonLogger.Error($"AAD: {name} — SendCounteroffer threw before completing; pending entry cleared: {ex.GetType().Name}: {ex.Message}");
+            return;
+        }
 
         // If HandleCounterOfferAccepted already fired synchronously (nested inside the call above),
         // the registry entry is gone and it has already logged the outcome itself — nothing more to do.
@@ -233,6 +280,8 @@ internal static class DealListener
         MelonCoroutines.Start(WaitForAsyncOutcome(customer, r, p));
     }
 
+    private enum DealOutcome { Accepted, AwaitingPlayerScheduling, Rejected }
+
     // Only reached when HandleCounterOfferAccepted didn't fire synchronously inside SendCounteroffer.
     // Waits several frames for a delayed OfferContract callback before declaring a genuine rejection.
     private static IEnumerator WaitForAsyncOutcome(Customer customer, DealRequest r, CounterProposal p)
@@ -240,6 +289,18 @@ internal static class DealListener
         for (int frame = 0; frame < 60; frame++)
         {
             yield return null;
+
+            // If the mod got toggled off (or the player left the scene) mid-wait, HandleOffer's own
+            // early-out means a delayed OfferContract callback would never reach us — we can no
+            // longer tell "the game rejected it" from "we stopped listening". Bail out quietly
+            // rather than logging an accusatory warning and recording a phantom decline for a
+            // counter that may well have been accepted.
+            if (!ModState.ShouldRun)
+            {
+                _registry.TakeForKey(customer.Pointer);
+                yield break;
+            }
+
             if (!_registry.HasPending(customer.Pointer))
                 yield break; // HandleCounterOfferAccepted fired asynchronously and already logged the outcome
         }
@@ -251,27 +312,40 @@ internal static class DealListener
         MelonLogger.Warning(
             $"AAD: {name} — counter-offer for {r.ProductId}×{p.Quantity} at {p.TotalPrice:F0} was rejected outright by the game " +
             "(no OfferContract callback came back after waiting); the probability model likely overestimated this customer's spending limit.");
-        DealStats.RecordDealDeclined();
-        LogOutcome(pending, "rejected");
+        LogOutcome(pending, DealOutcome.Rejected);
     }
 
-    private static void LogOutcome(PendingSend pending, string outcome)
+    // Single source of truth for both the outcome log line and the matching stat — the two used to
+    // live in different places (made recorded here, declined recorded at each call site), which is
+    // an asymmetry any future edit could silently break.
+    private static void LogOutcome(PendingSend pending, DealOutcome outcome)
     {
         var name = pending.Customer.NPC?.FullName ?? "<unknown>";
         var windowStr = pending.TimeModeSnapshot == TimeMode.WaitForPlayer
             ? "player-chosen"
             : (pending.Window.HasValue ? pending.Window.Value.ToString() : "none");
+        var outcomeStr = outcome switch
+        {
+            DealOutcome.Accepted => "accepted",
+            DealOutcome.AwaitingPlayerScheduling => "awaiting player scheduling",
+            DealOutcome.Rejected => "rejected",
+            _ => outcome.ToString(),
+        };
         MelonLogger.Msg(
             $"AAD: {name} — {pending.ProductId}×{pending.OriginalQuantity}→{pending.Quantity} ({pending.Quality}), " +
             $"payment {pending.OrigPayment:F0}→{pending.TotalPrice:F0} ({pending.Strategy}), region={pending.Region}, " +
-            $"location={pending.LocationGuid ?? "default"}, window={windowStr} → {outcome}.");
+            $"location={pending.LocationGuid ?? "default"}, window={windowStr} → {outcomeStr}.");
 
-        if (outcome == "accepted" || outcome == "awaiting player scheduling")
+        if (outcome == DealOutcome.Accepted || outcome == DealOutcome.AwaitingPlayerScheduling)
         {
             float origUnit = pending.OrigPayment / Math.Max(1, pending.OriginalQuantity);
             float newUnit = pending.TotalPrice / Math.Max(1, pending.Quantity);
             float marginPercent = origUnit > 0f ? (newUnit - origUnit) / origUnit * 100f : 0f;
             DealStats.RecordDealMade(marginPercent);
+        }
+        else
+        {
+            DealStats.RecordDealDeclined();
         }
     }
 
@@ -287,15 +361,18 @@ internal static class DealListener
 
             // The game's own counter-offer round-trip doesn't reliably leave OfferedContractInfo
             // holding the quantity/price we sent (observed in-game: customer order reverts to what
-            // they originally asked for) — force our countered values back onto it here.
-            ApplyCounterOfferValues(info, pending);
+            // they originally asked for) — force our countered values back onto it here. Prefer
+            // customer.OfferedContractInfo over the postfix's `info` parameter: nothing guarantees
+            // they're the same instance, and if they aren't, writing to `info` alone never lands.
+            var target = customer.OfferedContractInfo ?? info;
+            ApplyCounterOfferValues(target, pending);
 
             // Apply window times to ContractInfo synchronously.
-            string outcome;
+            DealOutcome outcome;
             if (pending.TimeModeSnapshot != TimeMode.WaitForPlayer && pending.Window.HasValue)
             {
                 var wi = DealWindowInfo.GetWindowInfo(pending.Window.Value);
-                var wc = info.DeliveryWindow;
+                var wc = target.DeliveryWindow;
                 if (wc != null)
                 {
                     wc.IsEnabled = true;
@@ -306,11 +383,16 @@ internal static class DealListener
                 // PlayerAcceptedContract must be deferred — calling it synchronously inside
                 // OfferContract's call stack throws NullReferenceException in game code.
                 MelonCoroutines.Start(AcceptAfterDelay(customer, pending));
-                outcome = "accepted";
+                outcome = DealOutcome.Accepted;
             }
             else
             {
-                outcome = "awaiting player scheduling";
+                // WaitForPlayer: the player accepts from the phone whenever they get to it, which
+                // can be minutes away. AcceptAfterDelay's 20-frame retry window doesn't apply here
+                // (nothing calls PlayerAcceptedContract on our behalf) — but the same field-reset
+                // problem does, so keep re-stamping OfferedContractInfo until it resolves.
+                MelonCoroutines.Start(ReapplyCounterOfferValuesWhileWaiting(customer, pending));
+                outcome = DealOutcome.AwaitingPlayerScheduling;
             }
 
             // Logged here (rather than back in SendCounterOffer) because this callback can fire
@@ -365,27 +447,71 @@ internal static class DealListener
         MelonLogger.Error($"AAD: PlayerAcceptedContract still failing after 20 frames for {customer.NPC?.FullName ?? "?"}; giving up.");
     }
 
+    // WaitForPlayer mode: nothing calls PlayerAcceptedContract for us, so unlike AcceptAfterDelay
+    // this can't just retry a handful of frames and give up — the player might not open the phone
+    // for minutes. Re-stamp every frame until the offer resolves (OfferedContractInfo changes away
+    // from this contract, or goes null) or a generous real-time ceiling is hit, matching roughly the
+    // customer's own offer-expiry window so this doesn't outlive the offer itself.
+    private static IEnumerator ReapplyCounterOfferValuesWhileWaiting(Customer customer, PendingSend pending)
+    {
+        const float MaxWaitSeconds = 15f * 60f;
+        var deadline = Time.realtimeSinceStartup + MaxWaitSeconds;
+        var trackedInfoPtr = customer.OfferedContractInfo?.Pointer ?? IntPtr.Zero;
+
+        while (Time.realtimeSinceStartup < deadline)
+        {
+            yield return null;
+            if (!ModState.ShouldRun) yield break;
+
+            ContractInfo? offered;
+            try { offered = customer.OfferedContractInfo; }
+            catch { yield break; } // customer/NPC torn down (scene change, despawn)
+
+            if (offered == null || offered.Pointer != trackedInfoPtr)
+                yield break; // resolved (accepted/rejected/expired) or replaced by a newer offer
+
+            try { ApplyCounterOfferValues(offered, pending); }
+            catch (Exception ex)
+            {
+                MelonLogger.Warning($"AAD: ReapplyCounterOfferValuesWhileWaiting failed for {customer.NPC?.FullName ?? "?"}: {ex.GetType().Name}: {ex.Message}");
+                yield break;
+            }
+        }
+    }
+
     // Forces the countered quantity/price back onto a ContractInfo. The game's counter-offer
     // round-trip (SendCounteroffer -> ProcessCounterOfferServerSide -> re-offer) only carries
     // productID/quantity/price as loose scalars over the RPC, not the ContractInfo we built —
     // nothing guarantees the resulting OfferedContractInfo matches what we proposed, and in
     // practice it can still hold the customer's original ask. Enforce it explicitly.
+    //
+    // Resolves and validates the product entry before writing anything, so a failure can't leave
+    // Payment reflecting the countered total while Quantity still reflects the customer's original
+    // ask (which AcceptAfterDelay would then re-stamp and re-warn about every frame).
     private static void ApplyCounterOfferValues(ContractInfo info, PendingSend pending)
     {
-        info.Payment = pending.TotalPrice;
-
         var entries = info.Products?.entries;
-        if (entries == null) return;
-
-        foreach (var entry in entries)
+        if (entries == null)
         {
-            if (entry == null || entry.ProductID != pending.ProductId) continue;
-            entry.Quantity = pending.Quantity;
+            MelonLogger.Warning(
+                $"AAD: ApplyCounterOfferValues — ContractInfo.Products/entries null; payment/quantity not enforced.");
             return;
         }
 
-        MelonLogger.Warning(
-            $"AAD: ApplyCounterOfferValues — no entry for product '{pending.ProductId}' in ContractInfo; quantity not enforced.");
+        ProductList.Entry? match = null;
+        foreach (var entry in entries)
+        {
+            if (entry != null && entry.ProductID == pending.ProductId) { match = entry; break; }
+        }
+        if (match == null)
+        {
+            MelonLogger.Warning(
+                $"AAD: ApplyCounterOfferValues — no entry for product '{pending.ProductId}' in ContractInfo; payment/quantity not enforced.");
+            return;
+        }
+
+        info.Payment = pending.TotalPrice;
+        match.Quantity = pending.Quantity;
     }
 
     private static IEnumerator ApplyLocationWhenContractAssigned(Customer customer, string locationGuid)
@@ -483,7 +609,7 @@ internal static class DealListener
             return;
         }
 
-        int total = 0;
+        int totalNew = 0;
         var lines = new List<string>();
         var regionsWalked = new List<EMapRegion>();
         foreach (var regionData in regions)
@@ -508,16 +634,21 @@ internal static class DealListener
 
             DiffAndWarn(region, found);
 
-            // Only worth a log line if this region has locations not already in the config file.
+            // Report only what's actually new in this region, not the region's full location
+            // count — a header built from whole-walk totals while the body lists a single new
+            // location is self-contradictory.
             var cachedGuids = Settings.DiscoveredLocations.TryGetValue(region, out var cached)
                 ? cached.Select(l => l.Guid).ToHashSet()
                 : new HashSet<string>();
-            if (found.Any(l => !cachedGuids.Contains(l.Guid)))
-                lines.Add($"  {region}: {found.Count} location(s) — " +
-                          string.Join(", ", found.Select(l => $"{l.Name} ({l.Guid})")));
+            var newInRegion = found.Where(l => !cachedGuids.Contains(l.Guid)).ToList();
+            if (newInRegion.Count > 0)
+            {
+                lines.Add($"  {region}: {newInRegion.Count} new location(s) — " +
+                          string.Join(", ", newInRegion.Select(l => $"{l.Name} ({l.Guid})")));
+                totalNew += newInRegion.Count;
+            }
 
             Settings.RecordDiscoveredLocations(region, found);
-            total += found.Count;
         }
 
         var expected = new HashSet<EMapRegion>(Enum.GetValues<EMapRegion>());
@@ -532,9 +663,12 @@ internal static class DealListener
 
         _discoveredThisSession = true;
 
+        // Additions get this summary; removals/renames already get their own Warning line each
+        // from DiffAndWarn above, so a walk with only removals isn't silent — it just doesn't
+        // duplicate into this "new since last config write" summary.
         if (lines.Count > 0)
         {
-            MelonLogger.Msg($"AAD: discovery walk — {total} location(s) across {regions.Count} region(s), new since last config write:");
+            MelonLogger.Msg($"AAD: discovery walk — {totalNew} new location(s) across {lines.Count} region(s) since last config write:");
             foreach (var line in lines) MelonLogger.Msg(line);
         }
     }
