@@ -36,6 +36,9 @@ internal static class Settings
     };
 
     public static int RoundingMultiple { get; private set; }
+    public static float MinProfitPercent { get; private set; }
+    public static float SpendingLimitSafetyMarginPercent { get; private set; }
+    public static bool AutoDeclineUncounterableDeals { get; private set; }
     public static LocationMode LocationMode { get; private set; }
     public static string? GlobalLocationGuid { get; private set; }
     public static IReadOnlyDictionary<EMapRegion, string?> RegionLocations => _regionLocations;
@@ -129,6 +132,33 @@ internal static class Settings
         TryPersist();
     }
 
+    public static void SetMinProfitPercent(float v)
+    {
+        // Must stay > -100: at exactly -100 the required per-unit floor hits zero, and below that
+        // it goes negative — a floor that can never reject anything, which is a meaningless setting
+        // rather than a "make it easier to counter" one.
+        if (v <= -100f) throw new ArgumentOutOfRangeException(nameof(v), "MinProfitPercent must be > -100.");
+        if (MinProfitPercent == v) return;
+        MinProfitPercent = v;
+        TryPersist();
+    }
+
+    public static void SetSpendingLimitSafetyMarginPercent(float v)
+    {
+        if (v <= 0f || v > 100f)
+            throw new ArgumentOutOfRangeException(nameof(v), "SpendingLimitSafetyMarginPercent must be in (0, 100].");
+        if (SpendingLimitSafetyMarginPercent == v) return;
+        SpendingLimitSafetyMarginPercent = v;
+        TryPersist();
+    }
+
+    public static void SetAutoDeclineUncounterableDeals(bool v)
+    {
+        if (AutoDeclineUncounterableDeals == v) return;
+        AutoDeclineUncounterableDeals = v;
+        TryPersist();
+    }
+
     public static void SetLocationMode(LocationMode m)
     {
         if (LocationMode == m) return;
@@ -166,13 +196,30 @@ internal static class Settings
 
     public static void RecordDiscoveredLocations(EMapRegion r, IEnumerable<DiscoveredLocation> locs)
     {
-        _discoveredLocations[r] = locs.ToArray();
+        var updated = locs.ToArray();
+        // Called once per region on every scene entry — skip the write + File.Move when nothing
+        // actually changed instead of rewriting the full settings file every time.
+        if (_discoveredLocations.TryGetValue(r, out var existing) && SameLocations(existing, updated))
+            return;
+
+        _discoveredLocations[r] = updated;
         TryPersist();
+    }
+
+    private static bool SameLocations(IReadOnlyList<DiscoveredLocation> a, IReadOnlyList<DiscoveredLocation> b)
+    {
+        if (a.Count != b.Count) return false;
+        for (int i = 0; i < a.Count; i++)
+            if (a[i].Name != b[i].Name || a[i].Guid != b[i].Guid) return false;
+        return true;
     }
 
     private static void ApplyDefaults()
     {
         RoundingMultiple = 0;
+        MinProfitPercent = 10f;
+        SpendingLimitSafetyMarginPercent = 85f;
+        AutoDeclineUncounterableDeals = true;
         LocationMode = LocationMode.Global;
         GlobalLocationGuid = null;
         TimeMode = TimeMode.WaitForPlayer;
@@ -193,6 +240,18 @@ internal static class Settings
 
         if (!TryReadInt(root, "roundingMultiple", v => v >= 0, v => RoundingMultiple = v,
                 "roundingMultiple must be a non-negative integer"))
+            needsRewrite = true;
+
+        if (!TryReadFloat(root, "minProfitPercent", v => v > -100f, v => MinProfitPercent = v,
+                "minProfitPercent must be a number greater than -100"))
+            needsRewrite = true;
+
+        if (!TryReadFloat(root, "spendingLimitSafetyMarginPercent", v => v > 0f && v <= 100f,
+                v => SpendingLimitSafetyMarginPercent = v,
+                "spendingLimitSafetyMarginPercent must be a number in (0, 100]"))
+            needsRewrite = true;
+
+        if (!TryReadBool(root, "autoDeclineUncounterableDeals", v => AutoDeclineUncounterableDeals = v))
             needsRewrite = true;
 
         if (!TryReadEnum<LocationMode>(root, "locationMode", v => LocationMode = v))
@@ -303,6 +362,30 @@ internal static class Settings
         return false;
     }
 
+    private static bool TryReadFloat(JsonElement root, string name, Func<float, bool> validate, Action<float> apply, string requirement)
+    {
+        if (!root.TryGetProperty(name, out var el)) return false;
+        if (el.ValueKind == JsonValueKind.Number && el.TryGetSingle(out var v) && validate(v))
+        {
+            apply(v);
+            return true;
+        }
+        MelonLogger.Warning($"Settings: {requirement}; using default.");
+        return false;
+    }
+
+    private static bool TryReadBool(JsonElement root, string name, Action<bool> apply)
+    {
+        if (!root.TryGetProperty(name, out var el)) return false;
+        if (el.ValueKind == JsonValueKind.True || el.ValueKind == JsonValueKind.False)
+        {
+            apply(el.GetBoolean());
+            return true;
+        }
+        MelonLogger.Warning($"Settings: {name} must be a boolean; using default.");
+        return false;
+    }
+
     private static bool TryReadEnum<TEnum>(JsonElement root, string name, Action<TEnum> apply) where TEnum : struct, Enum
     {
         if (!root.TryGetProperty(name, out var el)) return false;
@@ -386,6 +469,9 @@ internal static class Settings
         {
             SchemaVersion = CurrentSchemaVersion,
             RoundingMultiple = RoundingMultiple,
+            MinProfitPercent = MinProfitPercent,
+            SpendingLimitSafetyMarginPercent = SpendingLimitSafetyMarginPercent,
+            AutoDeclineUncounterableDeals = AutoDeclineUncounterableDeals,
             LocationMode = LocationMode.ToString(),
             GlobalLocationGuid = GlobalLocationGuid,
             TimeMode = TimeMode.ToString(),
@@ -428,6 +514,9 @@ internal static class Settings
     {
         public int SchemaVersion { get; set; }
         public int RoundingMultiple { get; set; }
+        public float MinProfitPercent { get; set; }
+        public float SpendingLimitSafetyMarginPercent { get; set; }
+        public bool AutoDeclineUncounterableDeals { get; set; }
         public string LocationMode { get; set; } = "";
         public string? GlobalLocationGuid { get; set; }
         public Dictionary<string, string?> RegionLocations { get; set; } = new();

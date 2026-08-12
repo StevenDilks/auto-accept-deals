@@ -134,6 +134,8 @@ internal static class SettingsPanel
         DrawBody();
         GUILayout.EndArea();
 
+        DrawStatsPanel();
+
         // Without GUILayout.Window we have to claim mouse events manually so clicks/scrolls
         // on the panel don't reach world-space UI sitting behind it. Buttons inside the panel
         // already consume their own events; this catches the gaps (the box background, scrollview
@@ -182,11 +184,57 @@ internal static class SettingsPanel
 
         DrawRoundingSection();
         GUILayout.Space(8f);
-        DrawLocationSection();
+        DrawProfitSection();
         GUILayout.Space(8f);
         DrawTimeSection();
+        GUILayout.Space(8f);
+        DrawLocationSection();
 
         GUILayout.EndScrollView();
+    }
+
+    private const float StatsPanelWidth = 220f;
+    private const float StatsPanelTopPadding = 24f;    // matches box title height
+    private const float StatsPanelBottomPadding = 8f;
+    private const float StatsPanelLineSpacing = 2f;
+    private const float StatsPanelGap = 8f;
+
+    private static void DrawStatsPanel()
+    {
+        // No EnsureCurrentDay() call here: Mod.OnUpdate already calls it every frame the mod is
+        // active, so the day is always current by the time OnGUI runs. Calling a mutating,
+        // logging method from the draw path would be a no-op at best — at worst it fires the
+        // reset between OnGUI's Layout and Repaint passes of the same frame, zeroing the counters
+        // the Layout pass already measured.
+        var successRate = DealStats.SuccessRatePercent;
+        var lines = new[]
+        {
+            $"Deals made: {DealStats.DealsMade}",
+            $"Deals declined: {DealStats.DealsDeclined}",
+            $"Avg. profit margin: {DealStats.AverageProfitMarginPercent:F1}%",
+            $"Success rate: {(successRate.HasValue ? $"{successRate.Value:F0}%" : "—")}",
+        };
+
+        // Height follows the number of stat lines (and their wrapped height) rather than a
+        // fixed guess, so the box never clips text as more stats get added later.
+        var labelStyle = GUI.skin.label;
+        var innerWidth = StatsPanelWidth - 16f;
+        float linesHeight = 0f;
+        foreach (var line in lines)
+            linesHeight += labelStyle.CalcHeight(new GUIContent(line), innerWidth) + StatsPanelLineSpacing;
+        var height = StatsPanelTopPadding + StatsPanelBottomPadding + linesHeight;
+
+        var rect = new Rect(_windowRect.x + _windowRect.width + StatsPanelGap, _windowRect.y,
+                            StatsPanelWidth, height);
+        GUI.Box(rect, "Today's stats");
+        var inner = new Rect(rect.x + 8f, rect.y + StatsPanelTopPadding,
+                             rect.width - 16f, rect.height - StatsPanelTopPadding - StatsPanelBottomPadding);
+        GUILayout.BeginArea(inner);
+        foreach (var line in lines)
+            GUILayout.Label(line);
+        GUILayout.EndArea();
+
+        ConsumeMouseEventsInRect(rect);
     }
 
     private static void DrawRoundingSection()
@@ -204,6 +252,48 @@ internal static class SettingsPanel
             if (Settings.RoundingMultiple != 0) Settings.SetRoundingMultiple(0);
         }
         GUILayout.EndHorizontal();
+    }
+
+    private static void DrawProfitSection()
+    {
+        GUILayout.Label($"Min profit: {Settings.MinProfitPercent:F0}%   (required per-unit price increase over the customer's ask; decline instead of countering below this)");
+        GUILayout.BeginHorizontal();
+        GUILayout.Space(20f);
+        if (GUILayout.Button("-5", GUILayout.Width(40f))) AdjustMinProfit(-5f);
+        if (GUILayout.Button("-1", GUILayout.Width(40f))) AdjustMinProfit(-1f);
+        if (GUILayout.Button("+1", GUILayout.Width(40f))) AdjustMinProfit(+1f);
+        if (GUILayout.Button("+5", GUILayout.Width(40f))) AdjustMinProfit(+5f);
+        GUILayout.EndHorizontal();
+
+        GUILayout.Label($"Spending limit safety margin: {Settings.SpendingLimitSafetyMarginPercent:F0}%   " +
+                        "(we estimate what a customer can afford, then only propose prices within this % of " +
+                        "that estimate — lower values leave more buffer in case the estimate runs high)");
+        GUILayout.BeginHorizontal();
+        GUILayout.Space(20f);
+        if (GUILayout.Button("-5", GUILayout.Width(40f))) AdjustSafetyMargin(-5f);
+        if (GUILayout.Button("-1", GUILayout.Width(40f))) AdjustSafetyMargin(-1f);
+        if (GUILayout.Button("+1", GUILayout.Width(40f))) AdjustSafetyMargin(+1f);
+        if (GUILayout.Button("+5", GUILayout.Width(40f))) AdjustSafetyMargin(+5f);
+        GUILayout.EndHorizontal();
+
+        GUILayout.Label("Auto-decline uncounterable deals   " +
+                        "(when no counter clears the min profit floor above, reject the deal outright " +
+                        "instead of leaving it unanswered in your texts)");
+        GUILayout.BeginHorizontal();
+        GUILayout.Space(20f);
+        DrawAutoDeclineButton("On", true);
+        DrawAutoDeclineButton("Off", false);
+        GUILayout.EndHorizontal();
+    }
+
+    private static void DrawAutoDeclineButton(string label, bool value)
+    {
+        bool currently = Settings.AutoDeclineUncounterableDeals == value;
+        var display = currently ? $"● {label}" : label;
+        if (GUILayout.Button(display, GUILayout.ExpandWidth(false)))
+        {
+            if (!currently) Settings.SetAutoDeclineUncounterableDeals(value);
+        }
     }
 
     private static void DrawLocationSection()
@@ -400,6 +490,20 @@ internal static class SettingsPanel
     {
         var v = Math.Max(0, Settings.RoundingMultiple + delta);
         if (v != Settings.RoundingMultiple) Settings.SetRoundingMultiple(v);
+    }
+
+    private static void AdjustMinProfit(float delta)
+    {
+        // Settings.SetMinProfitPercent requires > -100 (see its comment); clamp just above that
+        // so repeated -5/-1 clicks can't throw.
+        var v = Math.Max(-99f, Settings.MinProfitPercent + delta);
+        if (v != Settings.MinProfitPercent) Settings.SetMinProfitPercent(v);
+    }
+
+    private static void AdjustSafetyMargin(float delta)
+    {
+        var v = Mathf.Clamp(Settings.SpendingLimitSafetyMarginPercent + delta, 1f, 100f);
+        if (v != Settings.SpendingLimitSafetyMarginPercent) Settings.SetSpendingLimitSafetyMarginPercent(v);
     }
 
     private static void DrawDiscoveryHint(string text)

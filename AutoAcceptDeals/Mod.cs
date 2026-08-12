@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using HarmonyLib;
 using Il2CppScheduleOne.Economy;
+using Il2CppScheduleOne.GameTime;
 using Il2CppScheduleOne.Map;
 using Il2CppScheduleOne.Messaging;
 using Il2CppScheduleOne.PlayerScripts;
@@ -47,32 +48,53 @@ public class Mod : MelonMod
 
     private const string ExpectedVersion = "v0.4.6f11 (MelonLoader 0.7.3)";
 
+    private enum SymbolKind { Method, PropertyGetter, PropertySetter }
+
     private bool VerifyRequiredSymbols()
     {
-        var checks = new (Type type, string member, bool isProperty, Type[]? paramTypes)[]
+        var checks = new (Type type, string member, SymbolKind kind, Type[]? paramTypes)[]
         {
-            (typeof(Customer), nameof(Customer.OfferContract), false, null),
-            (typeof(Customer), nameof(Customer.SendCounteroffer), false, null),
-            (typeof(Customer), nameof(Customer.PlayerAcceptedContract), false, null),
-            (typeof(Customer), nameof(Customer.OfferedContractInfo), true, null),
-            (typeof(Customer), nameof(Customer.CurrentContract), true, null),
+            (typeof(Customer), nameof(Customer.OfferContract), SymbolKind.Method, null),
+            (typeof(Customer), nameof(Customer.SendCounteroffer), SymbolKind.Method, null),
+            (typeof(Customer), nameof(Customer.PlayerAcceptedContract), SymbolKind.Method, null),
+            (typeof(Customer), nameof(Customer.ContractRejected), SymbolKind.Method, null),
+            (typeof(Customer), nameof(Customer.OfferedContractInfo), SymbolKind.PropertyGetter, null),
+            // The interop dummy exposes this setter as public specifically so DealListener can null
+            // it out to defuse the offer-expiry timer — PropertyGetter alone wouldn't catch the
+            // setter disappearing on a game update.
+            (typeof(Customer), nameof(Customer.OfferedContractInfo), SymbolKind.PropertySetter, null),
+            (typeof(Customer), nameof(Customer.CurrentContract), SymbolKind.PropertyGetter, null),
             // nameof not usable — these members aren't referenced directly in this assembly
-            (typeof(Map), "GetRegionFromPosition", false, null),
-            (typeof(DealWindowInfo), "GetWindowInfo", false, null),
-            (typeof(MessagingManager), "GetConversation", false, null),
+            (typeof(Map), "GetRegionFromPosition", SymbolKind.Method, null),
+            (typeof(DealWindowInfo), "GetWindowInfo", SymbolKind.Method, null),
+            (typeof(MessagingManager), "GetConversation", SymbolKind.Method, null),
+            (typeof(MSGConversation), nameof(MSGConversation.ResponseChosen), SymbolKind.Method, null),
+            (typeof(MSGConversation), "currentResponses", SymbolKind.PropertyGetter, null),
+            // WakeTime is `public const int WakeTime = 700` in-game — a const is inlined at compile
+            // time, not backed by a property, so AccessTools.PropertyGetter can't resolve it (and
+            // even if it could, a const can never be runtime-verified against the game's value).
+            // CurrentTime/ElapsedDays below are real instance properties and are what actually guard
+            // DealStats' day-rollover logic; that's sufficient.
+            (typeof(TimeManager), nameof(TimeManager.CurrentTime), SymbolKind.PropertyGetter, null),
+            (typeof(TimeManager), nameof(TimeManager.ElapsedDays), SymbolKind.PropertyGetter, null),
             // Signature-sensitive: SettingsPanel calls these with a bool argument specifically.
-            (typeof(PlayerCamera), "LockMouse", false, new[] { typeof(bool) }),
-            (typeof(PlayerCamera), "FreeMouse", false, new[] { typeof(bool) }),
-            (typeof(PlayerCamera), nameof(PlayerCamera.CanLook), true, null),
+            (typeof(PlayerCamera), "LockMouse", SymbolKind.Method, new[] { typeof(bool) }),
+            (typeof(PlayerCamera), "FreeMouse", SymbolKind.Method, new[] { typeof(bool) }),
+            (typeof(PlayerCamera), nameof(PlayerCamera.CanLook), SymbolKind.PropertyGetter, null),
         };
 
         var failures = new List<string>();
-        foreach (var (type, member, isProperty, paramTypes) in checks)
+        foreach (var (type, member, kind, paramTypes) in checks)
         {
-            var found = isProperty
-                ? (object?)AccessTools.PropertyGetter(type, member)
-                : AccessTools.Method(type, member, paramTypes);
-            if (found == null) failures.Add($"{type.Name}.{member}");
+            object? found = kind switch
+            {
+                SymbolKind.Method => AccessTools.Method(type, member, paramTypes),
+                SymbolKind.PropertyGetter => AccessTools.PropertyGetter(type, member),
+                SymbolKind.PropertySetter => AccessTools.PropertySetter(type, member),
+                _ => null,
+            };
+            var suffix = kind == SymbolKind.PropertySetter ? " (setter)" : "";
+            if (found == null) failures.Add($"{type.Name}.{member}{suffix}");
         }
         if (failures.Count > 0)
         {
@@ -110,6 +132,12 @@ public class Mod : MelonMod
         // a UI hotkey conflict or EventSystem stall) — capture a mono_dump and inspect.
         try
         {
+            // Inside the try: TimeManager.instance can still throw during a scene-transition
+            // teardown even when InstanceExists reads true, and this handler exists precisely to
+            // catch and log that once instead of letting it escape MelonMod.OnUpdate and spam the
+            // log every frame until the transition finishes.
+            DealStats.EnsureCurrentDay();
+
             if (IsTextInputFocused()) return;
 
             if (Input.GetKeyDown(PanelKey))
