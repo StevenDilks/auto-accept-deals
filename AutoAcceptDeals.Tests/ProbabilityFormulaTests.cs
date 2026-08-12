@@ -89,6 +89,21 @@ public class ProbabilityFormulaTests
         Assert.NotEqual(p1, p2);
     }
 
+    // num5 is a tent: probability peaks at qty == origQty and decays as the ratio moves away in
+    // *either* direction — this is the mechanism issue #10's quantity climb relies on (a boundary
+    // exists above the floor, it isn't just monotonically decreasing).
+    [Fact]
+    public void QuantityRatio_IsATent_DecreasesOnBothSidesOfOrigQty()
+    {
+        const int origQty = 25;
+        float pBelow = ProbabilityFormula.Compute(500f, 1000f, vp0: 0.5f, vp2: 0.32f, productEnjoyment: 0.5f, qty: 13, origQty, maxAddictionRelation: 0f);
+        float pAt    = ProbabilityFormula.Compute(500f, 1000f, vp0: 0.5f, vp2: 0.32f, productEnjoyment: 0.5f, qty: origQty, origQty, maxAddictionRelation: 0f);
+        float pAbove = ProbabilityFormula.Compute(500f, 1000f, vp0: 0.5f, vp2: 0.32f, productEnjoyment: 0.5f, qty: 50, origQty, maxAddictionRelation: 0f);
+
+        Assert.True(pAt >= pBelow, $"Expected peak at origQty: pAt={pAt} should be >= pBelow={pBelow}");
+        Assert.True(pAt >= pAbove, $"Expected peak at origQty: pAt={pAt} should be >= pAbove={pAbove}");
+    }
+
     // --- Representative real-world cross-check ---
 
     // Mirroring the BetterCounterOfferUI probe values that drove the Phase 6 confirmation:

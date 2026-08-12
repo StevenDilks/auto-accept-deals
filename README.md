@@ -5,7 +5,7 @@ A [Schedule I](https://store.steampowered.com/app/3164500/) mod that automatical
 ## What it does
 
 - **Counter-offers automatically** — responds to every customer deal with the highest price they'll accept at 100% probability, using the same deterministic formula the game uses internally (ported in `ProbabilityFormula.cs`).
-- **Rounds requested quantity** — rounds the customer's requested quantity up to a configurable multiple. Set `roundingMultiple` to `0` to pass the quantity through unchanged.
+- **Rounds requested quantity** — rounds the customer's requested quantity up to a configurable multiple, then climbs further multiples above that floor looking for a higher-revenue quantity that still clears 100% acceptance, stopping at the first infeasible step. Set `roundingMultiple` to `0` to pass the quantity through unchanged.
 - **Applies a delivery location** — stamps a delivery location on each accepted contract, either one global location for all customers or a per-region location.
 - **Applies a delivery window** — assigns a delivery time window: a fixed slot, a randomly chosen slot from the four available windows, or defers to the player (lets the game's normal scheduling UI fire).
 

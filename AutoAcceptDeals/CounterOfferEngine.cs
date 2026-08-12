@@ -34,6 +34,14 @@ internal static class CounterOfferEngine
     // Non-deterministic: identical calls returned 1606/1643/1736 (~8% spread). Phase 7 replaces
     // the bisect loop with a deterministic probability reimplementation ported from
     // BetterCounterOfferUI 3.3.0 (OverweightUnicorn), which uses only public game APIs.
+    //
+    // Phase 8 (issue #10): the rounding floor is not necessarily the highest-revenue quantity
+    // that still clears 100% acceptance — ProbabilityFormula's quantity-ratio term is a tent
+    // peaking at qty == origQty, so revenue can keep climbing above the floor for a while before
+    // acceptance becomes infeasible. TryPropose now climbs QuantitySearch.FindBest over multiples
+    // of RoundingMultiple, filtering each candidate through the existing min-profit-per-unit
+    // guard first and maximizing total price among the survivors — this can only match or beat
+    // the old single-floor result.
 
     public static bool TryPropose(DealRequest r, out CounterProposal proposal, out CounterOfferFailureReason reason)
     {
@@ -47,51 +55,16 @@ internal static class CounterOfferEngine
             return false;
         }
 
+        var product = r.Product;
+
         var rounded = QuantityMath.RoundUpToMultiple(r.Quantity, Settings.RoundingMultiple);
         if (rounded > QuantityCap)
             MelonLogger.Warning($"AAD: engine — rounded qty {rounded} exceeds cap {QuantityCap}; clamping.");
         var effectiveQty = QuantityMath.Clamp(rounded, QuantityCap);
 
-        var (total, strategy) = SearchByProbability(r.Customer, r.Product, effectiveQty, r.Quantity, r.Payment);
-
-        // Only "probability" means the search actually ran against valid customer/relation data
-        // and produced a price. The other strategies ("probability-no-context",
-        // "probability-floor-at-limit", "probability-no-accept") are all evaluation failures —
-        // missing data or a degenerate search range — not a verdict that the deal is unprofitable.
-        if (strategy != "probability")
-            return false;
-
-        // Guards against sending a technically-100%-probability counter that isn't worth making.
-        // Compared per-unit rather than as a total-dollar bump — otherwise a rounding-inflated
-        // quantity can clear a total-price floor while the per-unit price actually drops (e.g.
-        // 90 for 2 units -> 105 for 5 units is +17% total but -53% per unit). Reject the deal
-        // (no counter sent) rather than chase margin the player wouldn't want anyway.
-        float origUnitPrice = r.Payment / Math.Max(1, r.Quantity);
-        float minUnitPrice = origUnitPrice * (1f + Settings.MinProfitPercent / 100f);
-        float minAcceptable = minUnitPrice * effectiveQty;
-        if (total < minAcceptable)
-        {
-            var name = r.Customer.NPC?.FullName ?? "<unknown>";
-            float bestUnitPrice = total / Math.Max(1, effectiveQty);
-            MelonLogger.Msg(
-                $"AAD: {name} — best counter for {r.ProductId}×{effectiveQty} only reaches {bestUnitPrice:F2}/unit " +
-                $"(need ≥{minUnitPrice:F2}/unit for {Settings.MinProfitPercent:F0}% min profit over {origUnitPrice:F2}/unit); declining, no counter sent.");
-            reason = CounterOfferFailureReason.NoProfitableCounterFound;
-            return false;
-        }
-
-        float unit = total / Math.Max(1, effectiveQty);
-        proposal = new CounterProposal(r.Product, effectiveQty, unit, total, strategy, r.Quantity);
-        return true;
-    }
-
-    // Binary-searches for the highest integer total-dollar price where Probability == 1.0f.
-    // ~17 iterations over [ceil(floor), spendingLimit-1].
-    private static (float total, string strategy) SearchByProbability(
-        Customer customer, ProductDefinition product, int qty, int origQty, float floor)
-    {
-        var ctx = ProbabilityContext.Capture(customer, product, qty, origQty, floor);
-        if (ctx == null) return (floor, "probability-no-context");
+        var ctx = ProbabilityContext.Capture(r.Customer, product, r.Quantity, r.Payment);
+        if (ctx == null)
+            return false; // CouldNotEvaluate — missing customer/relation data
 
         // SpendingLimit is a heuristic reimplementation of the game's real (unknown) limit, and it
         // can be too generous — the bisection below then finds a price it believes is a guaranteed
@@ -99,10 +72,59 @@ internal static class CounterOfferEngine
         // configurable margin instead of searching right up to it.
         float safeLimit = ctx.SpendingLimit * (Settings.SpendingLimitSafetyMarginPercent / 100f);
         int ceiling = (int)Math.Floor(safeLimit) - 1;
-        int floorInt = (int)Math.Ceiling(floor);
-        if (ceiling <= floorInt) return (floor, "probability-floor-at-limit");
+        int floorInt = (int)Math.Ceiling(r.Payment);
+        if (ceiling <= floorInt)
+            return false; // CouldNotEvaluate — degenerate search range
 
-        // No iteration cap needed — integer bisection over a finite [lo, hi] range terminates in ≤ log2(range) steps.
+        // Guards against sending a technically-100%-probability counter that isn't worth making.
+        // Compared per-unit rather than as a total-dollar bump — otherwise a rounding-inflated
+        // quantity can clear a total-price floor while the per-unit price actually drops (e.g.
+        // 90 for 2 units -> 105 for 5 units is +17% total but -53% per unit). Each climbed
+        // candidate is filtered by this floor before revenue is maximized, so the result can only
+        // match or beat what the single-floor search used to produce.
+        float origUnitPrice = r.Payment / Math.Max(1, r.Quantity);
+        float minUnitPrice = origUnitPrice * (1f + Settings.MinProfitPercent / 100f);
+
+        var result = QuantitySearch.FindBest(
+            effectiveQty, Settings.RoundingMultiple, QuantityCap, minUnitPrice,
+            qty =>
+            {
+                ctx.Qty = qty;
+                var best = BisectBestPrice(ctx, product, qty, floorInt, ceiling);
+                return best.HasValue ? (float?)best.Value : null;
+            });
+
+        LogTrace(r, product, Settings.RoundingMultiple, minUnitPrice, result);
+
+        if (!result.Found)
+        {
+            if (result.Trace.Count > 0 && result.Trace[0].Outcome == QuantitySearch.CandidateOutcome.Infeasible)
+            {
+                MelonLogger.Warning(
+                    $"AAD: engine — probability formula found no 100%-accept price in [{floorInt}, {ceiling}] for {product.ID}; using floor unchanged.");
+                return false; // CouldNotEvaluate — floor itself is infeasible
+            }
+
+            var floorCandidate = result.Trace[0];
+            float bestUnitPrice = floorCandidate.TotalPrice / Math.Max(1, floorCandidate.Quantity);
+            var name = r.Customer.NPC?.FullName ?? "<unknown>";
+            MelonLogger.Msg(
+                $"AAD: {name} — best counter for {r.ProductId}×{floorCandidate.Quantity} only reaches {bestUnitPrice:F2}/unit " +
+                $"(need ≥{minUnitPrice:F2}/unit for {Settings.MinProfitPercent:F0}% min profit over {origUnitPrice:F2}/unit); declining, no counter sent.");
+            reason = CounterOfferFailureReason.NoProfitableCounterFound;
+            return false;
+        }
+
+        float unit = result.TotalPrice / Math.Max(1, result.Quantity);
+        proposal = new CounterProposal(product, result.Quantity, unit, result.TotalPrice, "probability", r.Quantity);
+        return true;
+    }
+
+    // Binary-searches for the highest integer total-dollar price where Probability == 1.0f at a
+    // fixed qty. ~17 iterations over [floorInt, ceiling]. Returns null when no such price exists.
+    private static int? BisectBestPrice(
+        ProbabilityContext ctx, ProductDefinition product, int qty, int floorInt, int ceiling)
+    {
         int lo = floorInt, hi = ceiling, best = -1;
         while (lo <= hi)
         {
@@ -111,12 +133,45 @@ internal static class CounterOfferEngine
             float p = ctx.Probability(mid, vp2);
             if (p >= 1.0f) { best = mid; lo = mid + 1; } else hi = mid - 1;
         }
+        return best >= 0 ? best : (int?)null;
+    }
 
-        if (best >= 0) return (best, "probability");
+    // Verbose per-candidate trace, deliberately louder than the mod's steady-state logging so the
+    // climb can be validated against real deals. Only reachable when RoundingMultiple > 0, which
+    // is not the shipped default (Settings.ApplyDefaults sets it to 0), so this costs nothing out
+    // of the box and the multiple<=0 path stays exactly as quiet as before.
+    private static void LogTrace(
+        DealRequest r, ProductDefinition product, int multiple, float minUnitPrice, QuantitySearch.Result result)
+    {
+        if (multiple <= 0 || result.Trace.Count == 0) return;
 
-        MelonLogger.Warning(
-            $"AAD: engine — probability formula found no 100%-accept price in [{floorInt}, {ceiling}] for {product.ID}; using floor unchanged.");
-        return (floor, "probability-no-accept");
+        var name = r.Customer.NPC?.FullName ?? "<unknown>";
+        var floorCandidate = result.Trace[0];
+        MelonLogger.Msg(
+            $"AAD: {name} — qty search for {product.ID}: origQty={r.Quantity}, floor={floorCandidate.Quantity}, " +
+            $"step={multiple}, cap={QuantityCap}, need ≥{minUnitPrice:F2}/unit");
+
+        foreach (var c in result.Trace)
+        {
+            if (c.Outcome == QuantitySearch.CandidateOutcome.Infeasible)
+            {
+                MelonLogger.Msg($"AAD:   qty {c.Quantity} → no 100%-accept price, stopping");
+                continue;
+            }
+
+            float unit = c.TotalPrice / Math.Max(1, c.Quantity);
+            string marker = c.Outcome == QuantitySearch.CandidateOutcome.BelowMinProfit
+                ? "  below min profit, skipped"
+                : result.Found && c.Quantity == result.Quantity ? "  ← best" : "";
+            MelonLogger.Msg($"AAD:   qty {c.Quantity} → ${c.TotalPrice:F0} ({unit:F2}/unit){marker}");
+        }
+
+        if (result.Found)
+        {
+            MelonLogger.Msg(
+                $"AAD: {name} — qty search chose {result.Quantity} @ ${result.TotalPrice:F0} vs baseline " +
+                $"{floorCandidate.Quantity} @ ${floorCandidate.TotalPrice:F0} (+${result.TotalPrice - floorCandidate.TotalPrice:F0})");
+        }
     }
 
     private sealed class ProbabilityContext
@@ -134,7 +189,7 @@ internal static class CounterOfferEngine
                 ProductEnjoyment, Qty, OriginalQuantity, MaxAddictionRelation);
 
         public static ProbabilityContext? Capture(
-            Customer customer, ProductDefinition product, int qty, int origQty, float origPayment)
+            Customer customer, ProductDefinition product, int origQty, float origPayment)
         {
             try
             {
@@ -158,12 +213,12 @@ internal static class CounterOfferEngine
 
                 return new ProbabilityContext
                 {
-                    SpendingLimit       = weeklySpend / dayCount * 3f,
-                    ValueProposition0   = vp0,
-                    ProductEnjoyment    = enjoyment,
-                    OriginalQuantity    = origQty,
+                    SpendingLimit        = weeklySpend / dayCount * 3f,
+                    ValueProposition0    = vp0,
+                    ProductEnjoyment     = enjoyment,
+                    OriginalQuantity     = origQty,
                     MaxAddictionRelation = maxAddRel,
-                    Qty                 = qty,
+                    Qty                  = origQty, // reassigned per-candidate by the caller before use
                 };
             }
             catch (Exception ex)
