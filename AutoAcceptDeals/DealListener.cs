@@ -365,7 +365,9 @@ internal static class DealListener
             // customer.OfferedContractInfo over the postfix's `info` parameter: nothing guarantees
             // they're the same instance, and if they aren't, writing to `info` alone never lands.
             var target = customer.OfferedContractInfo ?? info;
-            ApplyCounterOfferValues(target, pending);
+            if (!ApplyCounterOfferValues(target, pending))
+                MelonLogger.Warning(
+                    $"AAD: {customer.NPC?.FullName ?? "?"} — ApplyCounterOfferValues failed for product '{pending.ProductId}'; payment/quantity not enforced on initial application.");
 
             // Apply window times to ContractInfo synchronously.
             DealOutcome outcome;
@@ -391,7 +393,7 @@ internal static class DealListener
                 // can be minutes away. AcceptAfterDelay's 20-frame retry window doesn't apply here
                 // (nothing calls PlayerAcceptedContract on our behalf) — but the same field-reset
                 // problem does, so keep re-stamping OfferedContractInfo until it resolves.
-                MelonCoroutines.Start(ReapplyCounterOfferValuesWhileWaiting(customer, pending));
+                MelonCoroutines.Start(ReapplyCounterOfferValuesWhileWaiting(customer, pending, target));
                 outcome = DealOutcome.AwaitingPlayerScheduling;
             }
 
@@ -423,7 +425,11 @@ internal static class DealListener
                 var offered = customer.OfferedContractInfo;
                 if (offered != null)
                 {
-                    ApplyCounterOfferValues(offered, pending);
+                    // Only warn on the first attempt — a failure here is structural and will repeat
+                    // identically on every retry; logging it 20 times adds nothing.
+                    if (!ApplyCounterOfferValues(offered, pending) && attempt == 0)
+                        MelonLogger.Warning(
+                            $"AAD: {customer.NPC?.FullName ?? "?"} — ApplyCounterOfferValues failed for product '{pending.ProductId}'; contract may retain original payment/quantity.");
                     if (!string.IsNullOrEmpty(locationGuid))
                         offered.DeliveryLocationGUID = locationGuid;
                 }
@@ -452,11 +458,17 @@ internal static class DealListener
     // for minutes. Re-stamp every frame until the offer resolves (OfferedContractInfo changes away
     // from this contract, or goes null) or a generous real-time ceiling is hit, matching roughly the
     // customer's own offer-expiry window so this doesn't outlive the offer itself.
-    private static IEnumerator ReapplyCounterOfferValuesWhileWaiting(Customer customer, PendingSend pending)
+    //
+    // `target` is the same ContractInfo HandleCounterOfferAccepted already resolved and applied to
+    // synchronously (customer.OfferedContractInfo, falling back to the postfix's `info` if that was
+    // null at that moment) — tracking its pointer directly means a null-at-start OfferedContractInfo
+    // no longer makes this a same-frame no-op.
+    private static IEnumerator ReapplyCounterOfferValuesWhileWaiting(Customer customer, PendingSend pending, ContractInfo target)
     {
         const float MaxWaitSeconds = 15f * 60f;
         var deadline = Time.realtimeSinceStartup + MaxWaitSeconds;
-        var trackedInfoPtr = customer.OfferedContractInfo?.Pointer ?? IntPtr.Zero;
+        var trackedInfoPtr = target.Pointer;
+        var loggedFailure = false;
 
         while (Time.realtimeSinceStartup < deadline)
         {
@@ -470,7 +482,18 @@ internal static class DealListener
             if (offered == null || offered.Pointer != trackedInfoPtr)
                 yield break; // resolved (accepted/rejected/expired) or replaced by a newer offer
 
-            try { ApplyCounterOfferValues(offered, pending); }
+            try
+            {
+                // Only warn once — a failure here is structural (missing/mismatched product entry)
+                // and will repeat identically on every frame for up to 15 minutes; logging it every
+                // time would spam ~54,000 identical lines.
+                if (!ApplyCounterOfferValues(offered, pending) && !loggedFailure)
+                {
+                    loggedFailure = true;
+                    MelonLogger.Warning(
+                        $"AAD: ReapplyCounterOfferValuesWhileWaiting — ApplyCounterOfferValues failed for {customer.NPC?.FullName ?? "?"}; will keep retrying silently for the rest of the wait.");
+                }
+            }
             catch (Exception ex)
             {
                 MelonLogger.Warning($"AAD: ReapplyCounterOfferValuesWhileWaiting failed for {customer.NPC?.FullName ?? "?"}: {ex.GetType().Name}: {ex.Message}");
@@ -488,30 +511,26 @@ internal static class DealListener
     // Resolves and validates the product entry before writing anything, so a failure can't leave
     // Payment reflecting the countered total while Quantity still reflects the customer's original
     // ask (which AcceptAfterDelay would then re-stamp and re-warn about every frame).
-    private static void ApplyCounterOfferValues(ContractInfo info, PendingSend pending)
+    //
+    // Returns success/failure instead of logging itself — this gets called every frame from both
+    // AcceptAfterDelay (up to 20 attempts) and ReapplyCounterOfferValuesWhileWaiting (up to ~54,000
+    // frames over 15 minutes), and a failure here is structural (missing/mismatched product entry),
+    // not transient — logging on every call would spam the log for the entire wait. Callers log once.
+    private static bool ApplyCounterOfferValues(ContractInfo info, PendingSend pending)
     {
         var entries = info.Products?.entries;
-        if (entries == null)
-        {
-            MelonLogger.Warning(
-                $"AAD: ApplyCounterOfferValues — ContractInfo.Products/entries null; payment/quantity not enforced.");
-            return;
-        }
+        if (entries == null) return false;
 
         ProductList.Entry? match = null;
         foreach (var entry in entries)
         {
             if (entry != null && entry.ProductID == pending.ProductId) { match = entry; break; }
         }
-        if (match == null)
-        {
-            MelonLogger.Warning(
-                $"AAD: ApplyCounterOfferValues — no entry for product '{pending.ProductId}' in ContractInfo; payment/quantity not enforced.");
-            return;
-        }
+        if (match == null) return false;
 
         info.Payment = pending.TotalPrice;
         match.Quantity = pending.Quantity;
+        return true;
     }
 
     private static IEnumerator ApplyLocationWhenContractAssigned(Customer customer, string locationGuid)

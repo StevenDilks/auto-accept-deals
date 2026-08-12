@@ -70,7 +70,11 @@ public class Mod : MelonMod
             (typeof(MessagingManager), "GetConversation", SymbolKind.Method, null),
             (typeof(MSGConversation), nameof(MSGConversation.ResponseChosen), SymbolKind.Method, null),
             (typeof(MSGConversation), "currentResponses", SymbolKind.PropertyGetter, null),
-            (typeof(TimeManager), nameof(TimeManager.WakeTime), SymbolKind.PropertyGetter, null),
+            // WakeTime is `public const int WakeTime = 700` in-game — a const is inlined at compile
+            // time, not backed by a property, so AccessTools.PropertyGetter can't resolve it (and
+            // even if it could, a const can never be runtime-verified against the game's value).
+            // CurrentTime/ElapsedDays below are real instance properties and are what actually guard
+            // DealStats' day-rollover logic; that's sufficient.
             (typeof(TimeManager), nameof(TimeManager.CurrentTime), SymbolKind.PropertyGetter, null),
             (typeof(TimeManager), nameof(TimeManager.ElapsedDays), SymbolKind.PropertyGetter, null),
             // Signature-sensitive: SettingsPanel calls these with a bool argument specifically.
