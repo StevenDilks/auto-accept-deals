@@ -38,6 +38,7 @@ internal static class Settings
     public static int RoundingMultiple { get; private set; }
     public static float MinProfitPercent { get; private set; }
     public static float SpendingLimitSafetyMarginPercent { get; private set; }
+    public static bool AutoDeclineUncounterableDeals { get; private set; }
     public static LocationMode LocationMode { get; private set; }
     public static string? GlobalLocationGuid { get; private set; }
     public static IReadOnlyDictionary<EMapRegion, string?> RegionLocations => _regionLocations;
@@ -151,6 +152,13 @@ internal static class Settings
         TryPersist();
     }
 
+    public static void SetAutoDeclineUncounterableDeals(bool v)
+    {
+        if (AutoDeclineUncounterableDeals == v) return;
+        AutoDeclineUncounterableDeals = v;
+        TryPersist();
+    }
+
     public static void SetLocationMode(LocationMode m)
     {
         if (LocationMode == m) return;
@@ -197,6 +205,7 @@ internal static class Settings
         RoundingMultiple = 0;
         MinProfitPercent = 10f;
         SpendingLimitSafetyMarginPercent = 85f;
+        AutoDeclineUncounterableDeals = true;
         LocationMode = LocationMode.Global;
         GlobalLocationGuid = null;
         TimeMode = TimeMode.WaitForPlayer;
@@ -226,6 +235,9 @@ internal static class Settings
         if (!TryReadFloat(root, "spendingLimitSafetyMarginPercent", v => v > 0f && v <= 100f,
                 v => SpendingLimitSafetyMarginPercent = v,
                 "spendingLimitSafetyMarginPercent must be a number in (0, 100]"))
+            needsRewrite = true;
+
+        if (!TryReadBool(root, "autoDeclineUncounterableDeals", v => AutoDeclineUncounterableDeals = v))
             needsRewrite = true;
 
         if (!TryReadEnum<LocationMode>(root, "locationMode", v => LocationMode = v))
@@ -348,6 +360,18 @@ internal static class Settings
         return false;
     }
 
+    private static bool TryReadBool(JsonElement root, string name, Action<bool> apply)
+    {
+        if (!root.TryGetProperty(name, out var el)) return false;
+        if (el.ValueKind == JsonValueKind.True || el.ValueKind == JsonValueKind.False)
+        {
+            apply(el.GetBoolean());
+            return true;
+        }
+        MelonLogger.Warning($"Settings: {name} must be a boolean; using default.");
+        return false;
+    }
+
     private static bool TryReadEnum<TEnum>(JsonElement root, string name, Action<TEnum> apply) where TEnum : struct, Enum
     {
         if (!root.TryGetProperty(name, out var el)) return false;
@@ -433,6 +457,7 @@ internal static class Settings
             RoundingMultiple = RoundingMultiple,
             MinProfitPercent = MinProfitPercent,
             SpendingLimitSafetyMarginPercent = SpendingLimitSafetyMarginPercent,
+            AutoDeclineUncounterableDeals = AutoDeclineUncounterableDeals,
             LocationMode = LocationMode.ToString(),
             GlobalLocationGuid = GlobalLocationGuid,
             TimeMode = TimeMode.ToString(),
@@ -477,6 +502,7 @@ internal static class Settings
         public int RoundingMultiple { get; set; }
         public float MinProfitPercent { get; set; }
         public float SpendingLimitSafetyMarginPercent { get; set; }
+        public bool AutoDeclineUncounterableDeals { get; set; }
         public string LocationMode { get; set; } = "";
         public string? GlobalLocationGuid { get; set; }
         public Dictionary<string, string?> RegionLocations { get; set; } = new();

@@ -102,12 +102,94 @@ internal static class DealListener
     {
         _discoveredThisSession = false;
         _registry.Clear();
+        DealStats.ResetForSceneLeave();
     }
 
     private static void ProcessRequest(DealRequest r)
     {
-        if (!CounterOfferEngine.TryPropose(r, out var p)) return;
+        if (!CounterOfferEngine.TryPropose(r, out var p))
+        {
+            if (Settings.AutoDeclineUncounterableDeals)
+                MelonCoroutines.Start(AutoDeclineAfterDelay(r.Customer));
+            return;
+        }
         SendCounterOffer(r, p);
+    }
+
+    // Without this, a deal AAD can't (or won't) counter just sits unanswered in the player's
+    // texts until they open the phone and decline it manually. Mirrors AcceptAfterDelay: calling
+    // a contract-response method synchronously inside OfferContract's call stack throws
+    // NullReferenceException in game code, so this is deferred and retried across frames too.
+    //
+    // Route through MSGConversation's Response system (the same one the "Sure thing" /
+    // "[Counter-offer]" / "No" buttons use) rather than calling Customer.ContractRejected()
+    // directly. ContractRejected() alone sends the canned decline reply but does not clear the
+    // response buttons — those are only cleared by MSGConversation.ResponseChosen(), which is what
+    // actually runs when the player clicks a button. ResponseChosen internally invokes the
+    // response's own callback (ContractRejected for reject), so this replaces — not supplements —
+    // the direct ContractRejected() call.
+    //
+    // The accept/reject button captions are NPC-personality flavor text that varies per customer
+    // (observed: "Sure thing"/"No" for one customer, "Yes"/"Not right now" for another) — they
+    // can't be matched by string. Button ORDER is what's stable: Accept, then the literal
+    // "[Counter-offer]", then Reject last. So take the last response, unless it turns out to BE
+    // "[Counter-offer]" (this contract didn't offer a reject option) — then there's nothing valid
+    // to click, so fall back to calling ContractRejected() directly.
+    private static IEnumerator AutoDeclineAfterDelay(Customer customer)
+    {
+        var name = customer.NPC?.FullName ?? "<unknown>";
+        for (int attempt = 0; attempt < 20; attempt++)
+        {
+            yield return null;
+            try
+            {
+                var conversation = MessagingManager.InstanceExists ? MessagingManager.Instance.GetConversation(customer.NPC) : null;
+                var responses = conversation?.currentResponses;
+                var declineResponse = (responses != null && responses.Count > 0) ? responses[responses.Count - 1] : null;
+
+                if (conversation != null && declineResponse != null && declineResponse.label != "[Counter-offer]")
+                {
+                    conversation.ResponseChosen(declineResponse, true);
+                }
+                else if (attempt == 19)
+                {
+                    // Never saw a usable reject response after 20 frames — fall back so the deal
+                    // doesn't go completely unanswered. This won't clear the UI buttons (the whole
+                    // reason for the ResponseChosen path above), but it's better than nothing.
+                    customer.ContractRejected();
+                }
+                else
+                {
+                    // Buttons haven't populated yet (currentResponses lags a frame or more behind
+                    // the offer) — this used to fall straight into the ContractRejected() fallback
+                    // on attempt 0, which skipped the retry loop entirely and left the real buttons
+                    // dangling (customer eventually gives up on their own and sends "nvm"). Retry
+                    // instead of settling for the broken fallback prematurely.
+                    continue;
+                }
+
+                // ResponseChosen/ContractRejected resolve the chat UI (buttons clear, "Oh ok" reply
+                // shows) but observed in-game: the underlying OfferedContractInfo the customer's own
+                // offer-expiry RPC timer (Customer.ExpireOffer/UpdateOfferExpiry) tracks isn't
+                // cleared by either — that timer still fires ~10 minutes later and sends its own
+                // give-up line ("Actually, nevermind"), on top of the already-resolved chat. The
+                // interop dummy exposes OfferedContractInfo's setter as public (the real game marks
+                // it protected), so null it out directly to defuse that timer instead of waiting for
+                // a second unwanted message.
+                try { customer.OfferedContractInfo = null; }
+                catch (Exception ex) { MelonLogger.Warning($"AAD: failed to clear OfferedContractInfo for {name}: {ex.GetType().Name}: {ex.Message}"); }
+            }
+            catch (Exception ex)
+            {
+                if (attempt == 19)
+                    MelonLogger.Warning($"AAD: auto-decline still failing after 20 frames for {name}: {ex.GetType().Name}: {ex.Message}");
+                continue;
+            }
+
+            DealStats.RecordDealDeclined();
+            MelonLogger.Msg($"AAD: {name} — no viable counter; auto-declined so it doesn't sit unanswered.");
+            yield break;
+        }
     }
 
     private static void SendCounterOffer(DealRequest r, CounterProposal p)
@@ -169,6 +251,7 @@ internal static class DealListener
         MelonLogger.Warning(
             $"AAD: {name} — counter-offer for {r.ProductId}×{p.Quantity} at {p.TotalPrice:F0} was rejected outright by the game " +
             "(no OfferContract callback came back after waiting); the probability model likely overestimated this customer's spending limit.");
+        DealStats.RecordDealDeclined();
         LogOutcome(pending, "rejected");
     }
 
@@ -182,6 +265,14 @@ internal static class DealListener
             $"AAD: {name} — {pending.ProductId}×{pending.OriginalQuantity}→{pending.Quantity} ({pending.Quality}), " +
             $"payment {pending.OrigPayment:F0}→{pending.TotalPrice:F0} ({pending.Strategy}), region={pending.Region}, " +
             $"location={pending.LocationGuid ?? "default"}, window={windowStr} → {outcome}.");
+
+        if (outcome == "accepted" || outcome == "awaiting player scheduling")
+        {
+            float origUnit = pending.OrigPayment / Math.Max(1, pending.OriginalQuantity);
+            float newUnit = pending.TotalPrice / Math.Max(1, pending.Quantity);
+            float marginPercent = origUnit > 0f ? (newUnit - origUnit) / origUnit * 100f : 0f;
+            DealStats.RecordDealMade(marginPercent);
+        }
     }
 
     // Called when OfferContract fires and the registry has a pending entry for this customer.

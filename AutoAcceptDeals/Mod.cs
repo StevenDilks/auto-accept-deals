@@ -105,6 +105,8 @@ public class Mod : MelonMod
     {
         if (!ModState.InGameScene) return;
 
+        DealStats.EnsureCurrentDay();
+
         // Intermittent freeze observed on O-toggle; if a log line appears here the cause is
         // managed. If the freeze recurs with no log entry, the cause is native-side (likely
         // a UI hotkey conflict or EventSystem stall) — capture a mono_dump and inspect.
