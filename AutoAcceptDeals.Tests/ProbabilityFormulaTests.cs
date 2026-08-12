@@ -89,9 +89,13 @@ public class ProbabilityFormulaTests
         Assert.NotEqual(p1, p2);
     }
 
-    // num5 is a tent: probability peaks at qty == origQty and decays as the ratio moves away in
-    // *either* direction — this is the mechanism issue #10's quantity climb relies on (a boundary
-    // exists above the floor, it isn't just monotonically decreasing).
+    // num5 (the quantity-ratio term) is a tent in isolation: it peaks at qty == origQty and decays
+    // as the ratio moves away in *either* direction, holding vp2 fixed. This does NOT by itself
+    // show that overall acceptance is single-peaked in qty — vp2 is itself qty-dependent in the
+    // real engine (Customer.GetValueProposition(product, price / qty) rises as qty rises at a
+    // fixed price, the opposite direction from num5) and Compute's several early-exit branches add
+    // further non-monotonicity on top of that. See QuantityAndValueProposition_NonMonotonic below
+    // for why QuantitySearch.FindBest does not stop climbing at the first infeasible candidate.
     [Fact]
     public void QuantityRatio_IsATent_DecreasesOnBothSidesOfOrigQty()
     {
@@ -102,6 +106,28 @@ public class ProbabilityFormulaTests
 
         Assert.True(pAt >= pBelow, $"Expected peak at origQty: pAt={pAt} should be >= pBelow={pBelow}");
         Assert.True(pAt >= pAbove, $"Expected peak at origQty: pAt={pAt} should be >= pAbove={pAbove}");
+    }
+
+    // Demonstrates the real non-monotonicity: a quantity CLOSER to origQty (so num5 is higher) can
+    // still be infeasible, while a FARTHER quantity (lower num5) is feasible, because vp2 rose
+    // enough to compensate. QuantitySearch.FindBest relies on exactly this — it treats an
+    // Infeasible reading as skip-and-continue rather than a hard stop.
+    [Fact]
+    public void QuantityAndValueProposition_NonMonotonic_NearerQtyCanBeInfeasibleWhileFartherQtyIsFeasible()
+    {
+        const int origQty = 25;
+
+        // qty=28 is close to origQty (num5 ~0.93) but modeled with a low vp2, as if price/qty were
+        // still relatively expensive at this quantity -> well below the p>=1 threshold.
+        float pNearer = ProbabilityFormula.Compute(500f, 1000f, vp0: 0.5f, vp2: 0.15f, productEnjoyment: 0.5f, qty: 28, origQty, maxAddictionRelation: 0f);
+
+        // qty=35 is farther from origQty (num5 ~0.78, lower than at qty=28) but modeled with a
+        // high vp2, as if price/qty were cheaper at this larger quantity -> hits the vp2*num5>vp0
+        // shortcut and returns 1f outright.
+        float pFarther = ProbabilityFormula.Compute(500f, 1000f, vp0: 0.5f, vp2: 0.70f, productEnjoyment: 0.5f, qty: 35, origQty, maxAddictionRelation: 0f);
+
+        Assert.True(pNearer < 1f, $"Expected the nearer qty to be infeasible at this vp2, got {pNearer}");
+        Assert.Equal(1f, pFarther);
     }
 
     // --- Representative real-world cross-check ---

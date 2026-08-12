@@ -126,7 +126,13 @@ internal static class Settings
 
     public static void SetRoundingMultiple(int v)
     {
-        if (v < 0) throw new ArgumentOutOfRangeException(nameof(v), "RoundingMultiple must be >= 0.");
+        // Upper-bounded by QuantityCap: QuantityMath.RoundUpToMultiple computes v + multiple - 1,
+        // which overflows to a negative "rounded" quantity for very large multiples (e.g.
+        // int.MaxValue) — Clamp then passes that negative straight through, seeding the
+        // quantity-search loop with a negative qty. A multiple above QuantityCap could never
+        // produce a useful (non-clamped) rounded quantity anyway.
+        if (v < 0 || v > CounterOfferEngine.QuantityCap)
+            throw new ArgumentOutOfRangeException(nameof(v), $"RoundingMultiple must be in [0, {CounterOfferEngine.QuantityCap}].");
         if (RoundingMultiple == v) return;
         RoundingMultiple = v;
         TryPersist();
@@ -238,8 +244,8 @@ internal static class Settings
     {
         bool needsRewrite = false;
 
-        if (!TryReadInt(root, "roundingMultiple", v => v >= 0, v => RoundingMultiple = v,
-                "roundingMultiple must be a non-negative integer"))
+        if (!TryReadInt(root, "roundingMultiple", v => v >= 0 && v <= CounterOfferEngine.QuantityCap, v => RoundingMultiple = v,
+                $"roundingMultiple must be an integer in [0, {CounterOfferEngine.QuantityCap}]"))
             needsRewrite = true;
 
         if (!TryReadFloat(root, "minProfitPercent", v => v > -100f, v => MinProfitPercent = v,

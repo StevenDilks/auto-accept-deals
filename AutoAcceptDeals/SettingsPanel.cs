@@ -488,7 +488,7 @@ internal static class SettingsPanel
 
     private static void AdjustRounding(int delta)
     {
-        var v = Math.Max(0, Settings.RoundingMultiple + delta);
+        var v = Math.Clamp(Settings.RoundingMultiple + delta, 0, CounterOfferEngine.QuantityCap);
         if (v != Settings.RoundingMultiple) Settings.SetRoundingMultiple(v);
     }
 
