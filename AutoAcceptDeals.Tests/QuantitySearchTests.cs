@@ -248,8 +248,9 @@ public class QuantitySearchTests
     }
 
     // Coverage for the runaway case: an `evaluate` that never returns null (several early-exit
-    // paths in ProbabilityFormula.Compute behave exactly this way) and a degenerate minUnitPrice
-    // that disables the priceCeiling bound must still terminate, via MaxCandidates -- and the
+    // paths in ProbabilityFormula.Compute behave exactly this way) and a `priceCeiling` of
+    // float.MaxValue -- which disables the priceCeiling bound regardless of minUnitPrice, since
+    // no finite per-unit price can ever reach it -- must still terminate, via MaxCandidates. The
     // result must say so, since the trace otherwise can't be told apart from a completed search.
     [Fact]
     public void FindBest_EvaluateNeverReturnsNull_BoundedByMaxCandidates()
@@ -261,5 +262,43 @@ public class QuantitySearchTests
         Assert.Equal(QuantitySearch.MaxCandidates, result.Trace.Count);
         Assert.All(result.Trace, c => Assert.Equal(QuantitySearch.CandidateOutcome.Feasible, c.Outcome));
         Assert.True(result.Truncated);
+    }
+
+    // The false-positive case PR #14 review caught: when the natural exit (cap reached, or the
+    // price-ceiling bound) lands on exactly the same candidate as the MaxCandidates governor, the
+    // governor must not get credit for a stop it didn't cause. startQty=20, multiple=20, cap=1000
+    // walks exactly 50 candidates (20, 40, ..., 1000); the climb should end because `next` (1020)
+    // exceeds the cap, not because the trace hit MaxCandidates on the same step.
+    [Fact]
+    public void FindBest_RangeExhaustsOnExactlyMaxCandidates_NotReportedAsTruncated()
+    {
+        var result = QuantitySearch.FindBest(
+            startQty: 20, multiple: 20, cap: 1000, minUnitPrice: 0f, priceCeiling: float.MaxValue,
+            evaluate: qty => 1f); // flat, deliberately below any real unit price so nothing but qty20 ever wins
+
+        Assert.Equal(QuantitySearch.MaxCandidates, result.Trace.Count);
+        Assert.Equal(1000, result.Trace[^1].Quantity);
+        Assert.False(result.Truncated);
+    }
+
+    // The step-size-dependence bug PR #14 review caught: measuring the margin against whichever
+    // candidate is the running per-unit best (instead of the fixed floor) makes the outcome depend
+    // on which multiples the rounding step happens to sample. With multiple=5, qty15's 33.70/unit
+    // clears the margin over the floor (33.00) and would, under incumbent-based margining, become
+    // the new incumbent -- then qty20's 34.30/unit fails to clear a fresh margin over *that*
+    // (33.70 * 1.02 = 34.37), losing to a worse per-unit result than multiple=10 finds by skipping
+    // straight from the floor to qty20. Both must converge on the true best: qty20 @ 34.30/unit.
+    [Theory]
+    [InlineData(5)]
+    [InlineData(10)]
+    public void FindBest_MarginAppliesAgainstFloorNotRunningIncumbent_IndependentOfStepSize(int multiple)
+    {
+        var curve = Curve(new() { [10] = 330f, [15] = 505.5f, [20] = 686f }); // 33.00 / 33.70 / 34.30 per unit
+        var result = QuantitySearch.FindBest(
+            startQty: 10, multiple: multiple, cap: 20, minUnitPrice: 30f, priceCeiling: float.MaxValue, curve);
+
+        Assert.True(result.Found);
+        Assert.Equal(20, result.Quantity);
+        Assert.Equal(686f, result.TotalPrice);
     }
 }
