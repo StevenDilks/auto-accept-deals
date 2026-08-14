@@ -172,11 +172,11 @@ internal static class CounterOfferEngine
     // climb can be validated against real deals — kept unconditional (not gated behind its own
     // setting) per issue #10's ask for this to be the feature's primary debugging tool. Only
     // reachable when RoundingMultiple > 0, which is not the shipped default (Settings.ApplyDefaults
-    // sets it to 0), so this costs nothing out of the box. The price-ceiling bound tightens as soon
-    // as a Feasible candidate is found (see QuantitySearch), so MaxCandidates + 2 lines is the
-    // ordinary worst case only up to that point; a climb where no candidate ever clears the
-    // min-profit floor stays on the looser, untightened bound for its entire length and can reach
-    // MaxCandidates + 2 regardless of minUnitPrice.
+    // sets it to 0), so this costs nothing out of the box. MaxCandidates + 2 lines is the worst
+    // case only when the price-ceiling bound is tight relative to MaxCandidates steps; that bound
+    // is a ratio (priceCeiling / threshold, see QuantitySearch), not a fixed count, so a low
+    // minUnitPrice — or a floor candidate not far above it — can leave it loose whether or not a
+    // Feasible candidate has been found, and MaxCandidates + 2 lines is reachable either way.
     private static void LogTrace(
         DealRequest r, ProductDefinition product, int multiple, float minUnitPrice, QuantitySearch.Result result)
     {
@@ -184,24 +184,23 @@ internal static class CounterOfferEngine
 
         var name = r.Customer.NPC?.FullName ?? "<unknown>";
         var floorCandidate = result.Trace[0];
+        float marginPercent = (QuantitySearch.MinImprovementRatio - 1f) * 100f;
+        // The margin only applies when the floor itself is Feasible (see QuantitySearch.FindBest);
+        // stating it unconditionally would claim a rule that wasn't actually in effect on a
+        // floor-Infeasible or floor-BelowMinProfit trace, where nothing in the log backs it up.
+        string marginClause = floorCandidate.Outcome == QuantitySearch.CandidateOutcome.Feasible
+            ? $", needs >{marginPercent:F0}% over floor to beat it"
+            : "";
         MelonLogger.Msg(
             $"AAD: {name} — qty search for {product.ID}: origQty={r.Quantity}, floor={floorCandidate.Quantity}, " +
-            $"step={multiple}, cap={QuantityMath.QuantityCap}, need ≥{minUnitPrice:F2}/unit, " +
-            $"+{(QuantitySearch.MinImprovementRatio - 1f) * 100f:F0}% margin over floor to beat it");
+            $"step={multiple}, cap={QuantityMath.QuantityCap}, need ≥{minUnitPrice:F2}/unit{marginClause}");
 
-        // The raw per-unit best among Feasible candidates — the one the margin check (in
-        // QuantitySearch.FindBest) weighs against the floor. When it isn't the winner, a plain
-        // "not marked best" line would be silently misleading, since it's the highest per-unit
-        // number in the whole trace; call out why it lost explicitly instead of leaving that gap.
-        QuantitySearch.Candidate? rawBest = null;
-        foreach (var c in result.Trace)
-        {
-            if (c.Outcome == QuantitySearch.CandidateOutcome.Feasible
-                && (rawBest is null || c.UnitPrice > rawBest.Value.UnitPrice))
-            {
-                rawBest = c;
-            }
-        }
+        // result.BestFeasible is the exact candidate FindBest's own margin check weighed against
+        // the floor — reading it here instead of re-deriving an argmax from Trace keeps this
+        // marker provably in sync with the selection it's explaining, rather than a second,
+        // independently-written loop that could silently disagree if either one's tie-break or
+        // filter changes.
+        var rawBest = result.BestFeasible;
 
         foreach (var c in result.Trace)
         {
@@ -223,8 +222,13 @@ internal static class CounterOfferEngine
             else if (rawBest is { } rb && c.Quantity == rb.Quantity
                 && floorCandidate.Outcome == QuantitySearch.CandidateOutcome.Feasible)
             {
+                // F2, not F1: the selection check is `<=`, so an exact-margin candidate still
+                // loses. At F1 that boundary rounds to the same number as the threshold itself
+                // ("+2.0% over floor, under 2% margin" — reads as contradicting its own rule);
+                // F2 keeps the rare true-tie case legible instead, and "needs >" instead of
+                // "under" states the actual comparison rather than one that can read as satisfied.
                 float pctOverFloor = (c.UnitPrice / floorCandidate.UnitPrice - 1f) * 100f;
-                marker = $"  +{pctOverFloor:F1}% over floor, under {(QuantitySearch.MinImprovementRatio - 1f) * 100f:F0}% margin, skipped";
+                marker = $"  +{pctOverFloor:F2}% over floor, needs >{marginPercent:F0}% to beat it, skipped";
             }
             else
             {

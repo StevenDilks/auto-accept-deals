@@ -59,6 +59,12 @@ public class QuantitySearchTests
         Assert.True(result.Found);
         Assert.Equal(10, result.Quantity);
         Assert.Equal(330f, result.TotalPrice);
+
+        // BestFeasible names the raw argmax that lost the margin check (qty50), distinct from the
+        // floor that actually won (qty10) — callers explaining the trace (e.g. LogTrace) need this
+        // exact value, not a re-derived one, to point at the right candidate.
+        Assert.NotNull(result.BestFeasible);
+        Assert.Equal(50, result.BestFeasible!.Value.Quantity);
     }
 
     [Fact]
@@ -300,5 +306,27 @@ public class QuantitySearchTests
         Assert.True(result.Found);
         Assert.Equal(20, result.Quantity);
         Assert.Equal(686f, result.TotalPrice);
+    }
+
+    // The bound-staleness bug PR #14 review caught: once the floor is Feasible but hasn't cleared
+    // its own margin, a future candidate has to beat floor.UnitPrice * MinImprovementRatio (10.2)
+    // to change the winner, not just floor.UnitPrice (10) — beating 10 without clearing 10.2 still
+    // loses to the floor at the end, so evaluating it is wasted work. Flat 10/unit curve means
+    // bestFeasible never moves off the floor, so needed stays at 10.2 throughout. With
+    // priceCeiling=306: the margin-aware bound closes at next=30 (10.2*30=306, stops after qty25,
+    // 4 candidates); the pre-fix bound (needed=10, ignoring the margin) wouldn't have closed until
+    // next=35 (10*35=350), evaluating qty30 too.
+    [Fact]
+    public void FindBest_PriceCeilingBound_AccountsForFloorMargin_NotJustRawIncumbent()
+    {
+        var result = QuantitySearch.FindBest(
+            startQty: 10, multiple: 5, cap: 1000, minUnitPrice: 0f, priceCeiling: 306f,
+            evaluate: qty => System.MathF.Min(306f, qty * 10f));
+
+        Assert.True(result.Found);
+        Assert.Equal(10, result.Quantity);
+        Assert.Equal(4, result.Trace.Count);
+        Assert.Equal(25, result.Trace[^1].Quantity);
+        Assert.False(result.Truncated);
     }
 }
