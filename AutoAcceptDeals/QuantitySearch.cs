@@ -22,7 +22,13 @@ namespace AutoAcceptDeals;
 // candidate a finer grid would reject (see
 // FindBest_MarginAppliesAgainstFloorNotRunningIncumbent_IndependentOfStepSize in the test file).
 // Unlike that incumbent, the baseline itself is fixed the moment it's found and never moves again
-// for the rest of the climb.
+// for the rest of the climb — but that only makes the *outcome* independent of step size when the
+// floor is Feasible. When it isn't, the baseline is the first Feasible candidate the climb happens
+// to land on, which is itself a function of the grid: a coarser step can jump straight past an
+// earlier Feasible candidate a finer step would have used as the baseline, landing on a winner the
+// finer step would have rejected as an immaterial gain over it (see
+// FindBest_FloorNotFeasible_CoarserGridAcceptsCandidateFinerGridRejects). That grid-sensitivity is
+// inherent to the fallback, not a defect the margin check is meant to rule out.
 //
 // Feasibility is not assumed monotone in qty: ProbabilityFormula.Compute is driven by a
 // qty-ratio term that decays away from origQty *and* a value-proposition term that generally
@@ -132,9 +138,10 @@ internal static class QuantitySearch
 
         Candidate? bestFeasible = null;
         // The first Feasible candidate seen, and only ever that one — never reassigned once set.
-        // Always non-null exactly when bestFeasible is (both are set, once, on the same
-        // candidate: the first Feasible one), which the return statements below and the
-        // `bestFeasible is { }` branch rely on.
+        // Always non-null exactly when bestFeasible is: both are first assigned on the same
+        // candidate (the first Feasible one), then bestFeasible moves with the argmax on every
+        // later Feasible candidate while this one never does — which the return statements below
+        // and the `bestFeasible is { }` branch rely on.
         Candidate? marginBaseline = null;
         Candidate? bestBelowMinProfit = null;
         bool truncated = false;

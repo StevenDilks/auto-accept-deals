@@ -361,4 +361,30 @@ public class QuantitySearchTests
         Assert.NotNull(result.BestFeasible);
         Assert.Equal(20, result.BestFeasible!.Value.Quantity);
     }
+
+    // The grid-sensitivity PR #14 review pointed out as an unpinned edge of the fallback above:
+    // when the floor isn't Feasible, the margin baseline is "the first Feasible candidate the
+    // climb finds" -- which depends on which multiples the step size happens to sample, unlike
+    // the Feasible-floor case (see FindBest_MarginAppliesAgainstFloorNotRunningIncumbent_
+    // IndependentOfStepSize, which only covers Feasible floors and so never exercised this).
+    // Same curve as FindBest_FloorNotFeasible_MarginStillAppliesAgainstFirstFeasibleCandidate --
+    // at multiple=5 that test lands on qty15 (33.00/unit) as the baseline, which qty20's
+    // 33.02/unit fails to clear. Here, multiple=10 skips qty15 entirely: qty20 is the *first*
+    // Feasible candidate the coarser grid ever samples, so it is simultaneously its own baseline
+    // and its own argmax and wins outright -- the exact "coarser grid accepts what a finer grid
+    // would reject" shape the class doc now calls out as an accepted limitation, not a bug.
+    [Fact]
+    public void FindBest_FloorNotFeasible_CoarserGridAcceptsCandidateFinerGridRejects()
+    {
+        var curve = Curve(new() { [10] = 300f, [15] = 495f, [20] = 660.4f }); // 30.00 / 33.00 / 33.02 per unit
+        var result = QuantitySearch.FindBest(
+            startQty: 10, multiple: 10, cap: 20, minUnitPrice: 33f, priceCeiling: float.MaxValue, curve);
+
+        Assert.True(result.Found);
+        Assert.Equal(20, result.Quantity);
+        Assert.Equal(660.4f, result.TotalPrice);
+
+        Assert.NotNull(result.MarginBaseline);
+        Assert.Equal(20, result.MarginBaseline!.Value.Quantity);
+    }
 }

@@ -48,8 +48,11 @@ internal static class CounterOfferEngine
     // total — that would systematically pick the largest feasible quantity, i.e. the worst
     // per-unit survivor, defeating the guard; and not a bare per-unit maximum either — that would
     // let a fractional-cent "improvement" justify a much larger order; and the margin is checked
-    // once against the fixed baseline rather than incrementally against a moving incumbent, so
-    // the outcome doesn't depend on which multiples the rounding step happens to sample). Any
+    // once against the fixed baseline rather than incrementally against a moving incumbent, which
+    // keeps the outcome independent of the rounding step whenever the floor itself is Feasible —
+    // when it isn't, the baseline is the first Feasible candidate the climb happens to land on, so
+    // a coarser step can still land on a different winner than a finer one would; see
+    // QuantitySearch for why that's an accepted limitation of the fallback, not a bug). Any
     // Feasible winner already clears minUnitPrice by construction, so the result can only match
     // or beat the floor whenever the floor itself wasn't Feasible; when it was, it doubles as the
     // baseline and the margin check governs directly. The climb no longer stops at the first
@@ -133,16 +136,22 @@ internal static class CounterOfferEngine
 
             // A truncated search stopped at MaxCandidates before the price-ceiling bound closed
             // on its own, so an unevaluated remainder past it still exists and isn't provably
-            // BelowMinProfit — some of it could have been Feasible. Declining here would assert
-            // "this deal is genuinely unprofitable" on a search that admits it didn't finish
-            // checking that, which is exactly the CouldNotEvaluate/NoProfitableCounterFound
-            // distinction this file's header warns against collapsing (a governor-truncated
-            // search is transient in the same sense missing customer data is — it says nothing
-            // about the deal). A Found result that's also Truncated is left alone here: it did
-            // find a genuine Feasible candidate clearing the min-profit floor, just possibly not
-            // the single best one, which is a quality gap the Truncated warning below already
-            // surfaces, not a reason to withhold an otherwise-valid counter.
-            if (result.Truncated)
+            // BelowMinProfit — some of it could have been Feasible. But that only leaves the
+            // verdict unresolved when the floor itself never produced a usable price: the floor
+            // is always Trace[0], always evaluated first and in full regardless of what the
+            // governor did 49 steps later, so a BelowMinProfit floor is a complete, sound verdict
+            // on its own — the exact one the pre-search single-floor code on main would have
+            // declined on. Routing that case to CouldNotEvaluate would turn a fully-evaluated
+            // decline into a deal that sits unanswered forever (truncation is deterministic for a
+            // given deal, so it never resolves on retry); the un-walked remainder is only a missed
+            // *upside* (a possibly-better candidate further out), never grounds to call the floor's
+            // own verdict unsound. Only an Infeasible floor means no candidate the pre-search code
+            // would ever have sent was evaluated at all — that's the case this guards. A Found
+            // result that's also Truncated is left alone here regardless: it did find a genuine
+            // Feasible candidate clearing the min-profit floor, just possibly not the single best
+            // one, which is a quality gap the Truncated warning below already surfaces, not a
+            // reason to withhold an otherwise-valid counter.
+            if (result.Truncated && floorCandidate.Outcome == QuantitySearch.CandidateOutcome.Infeasible)
             {
                 MelonLogger.Warning(
                     $"AAD: engine — quantity search for {product.ID} hit the candidate limit before the " +
