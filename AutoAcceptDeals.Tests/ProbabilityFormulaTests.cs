@@ -220,6 +220,46 @@ public class ProbabilityFormulaTests
         Assert.Equal(1f, p);
     }
 
+    // --- FirstDeadZoneQty ---
+
+    // Threshold for origQty=10 is 32 (see IsDeadZoneQty_AtThreshold_ReturnsTrue above); a cap well
+    // past it should still land exactly on the threshold, not just "somewhere in the dead zone".
+    [Fact]
+    public void FirstDeadZoneQty_CapWellPastThreshold_ReturnsThreshold()
+        => Assert.Equal(32, ProbabilityFormula.FirstDeadZoneQty(origQty: 10, cap: 1000));
+
+    [Fact]
+    public void FirstDeadZoneQty_CapExactlyAtThreshold_ReturnsCap()
+        => Assert.Equal(32, ProbabilityFormula.FirstDeadZoneQty(origQty: 10, cap: 32));
+
+    // The dead zone never opens within [1, cap] here, so there's no such qty to return — cap+1 is
+    // the documented sentinel for "none", not a clamped/incorrect answer.
+    [Fact]
+    public void FirstDeadZoneQty_CapBelowThreshold_ReturnsCapPlusOne()
+        => Assert.Equal(21, ProbabilityFormula.FirstDeadZoneQty(origQty: 10, cap: 20));
+
+    [Fact]
+    public void FirstDeadZoneQty_CapOneBelowThreshold_ReturnsCapPlusOne()
+        => Assert.Equal(32, ProbabilityFormula.FirstDeadZoneQty(origQty: 10, cap: 31));
+
+    // Cross-check against IsDeadZoneQty directly, across several origQty values, rather than
+    // trusting one hand-derived boundary: the returned qty must itself be a dead-zone qty, and the
+    // qty immediately below it must not be — the exact bisection invariant.
+    [Theory]
+    [InlineData(1)]
+    [InlineData(3)]
+    [InlineData(10)]
+    [InlineData(25)]
+    [InlineData(117)]
+    public void FirstDeadZoneQty_MatchesIsDeadZoneQty_BisectionInvariant(int origQty)
+    {
+        const int cap = 1000;
+        int first = ProbabilityFormula.FirstDeadZoneQty(origQty, cap);
+        Assert.True(first <= cap);
+        Assert.True(ProbabilityFormula.IsDeadZoneQty(first, origQty));
+        Assert.False(ProbabilityFormula.IsDeadZoneQty(first - 1, origQty));
+    }
+
     // --- Representative real-world cross-check ---
 
     // Mirroring the BetterCounterOfferUI probe values that drove the Phase 6 confirmation:

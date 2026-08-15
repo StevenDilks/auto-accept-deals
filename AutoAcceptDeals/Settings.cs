@@ -140,10 +140,12 @@ internal static class Settings
 
     public static void SetMinProfitPercent(float v)
     {
-        // Must stay > -100: at exactly -100 the required per-unit floor hits zero, and below that
-        // it goes negative — a floor that can never reject anything, which is a meaningless setting
-        // rather than a "make it easier to counter" one.
-        if (v <= -100f) throw new ArgumentOutOfRangeException(nameof(v), "MinProfitPercent must be > -100.");
+        // -100 is allowed and means "no per-unit floor" (minUnitPrice collapses to exactly 0,
+        // which QuantitySearch already treats as filter-off): under the total-revenue quantity
+        // search, that's a real, useful setting — maximize total revenue with no per-unit
+        // constraint at all — not a degenerate one. Below -100 the floor would go negative, which
+        // really is meaningless (a floor no candidate could ever fail), so that's still rejected.
+        if (v < -100f) throw new ArgumentOutOfRangeException(nameof(v), "MinProfitPercent must be >= -100.");
         if (MinProfitPercent == v) return;
         MinProfitPercent = v;
         TryPersist();
@@ -248,8 +250,8 @@ internal static class Settings
                 $"roundingMultiple must be an integer in [0, {QuantityMath.QuantityCap}]"))
             needsRewrite = true;
 
-        if (!TryReadFloat(root, "minProfitPercent", v => v > -100f, v => MinProfitPercent = v,
-                "minProfitPercent must be a number greater than -100"))
+        if (!TryReadFloat(root, "minProfitPercent", v => v >= -100f, v => MinProfitPercent = v,
+                "minProfitPercent must be a number >= -100"))
             needsRewrite = true;
 
         if (!TryReadFloat(root, "spendingLimitSafetyMarginPercent", v => v > 0f && v <= 100f,

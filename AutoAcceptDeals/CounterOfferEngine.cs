@@ -100,8 +100,20 @@ internal static class CounterOfferEngine
         float origUnitPrice = r.Payment / Math.Max(1, r.Quantity);
         float minUnitPrice = origUnitPrice * (1f + Settings.MinProfitPercent / 100f);
 
+        // Every qty at or past the dead zone is Infeasible at every price when
+        // DeadZoneAlwaysRejects holds for this deal, so there is nothing up there worth walking —
+        // bound the climb instead of discovering the boundary one candidate at a time. Math.Max
+        // keeps the rounding floor itself evaluated even when it's already past the dead zone
+        // (small origQty + coarse multiple), so an all-Infeasible trace still reads as one
+        // (PR #14 review, round 9 — this replaces the round-8 per-candidate BisectBestPrice-only
+        // shortcut, which pruned the interop cost of each dead-zone candidate but still let the
+        // climb walk, trace, and log every one of them up to MaxCandidates).
+        int searchCap = QuantityMath.QuantityCap;
+        if (ProbabilityFormula.DeadZoneAlwaysRejects(ctx.ValueProposition0, ctx.ProductEnjoyment, ctx.MaxAddictionRelation))
+            searchCap = Math.Max(effectiveQty, ProbabilityFormula.FirstDeadZoneQty(r.Quantity, QuantityMath.QuantityCap) - 1);
+
         var result = QuantitySearch.FindBest(
-            effectiveQty, Settings.RoundingMultiple, QuantityMath.QuantityCap, minUnitPrice, ceiling,
+            effectiveQty, Settings.RoundingMultiple, searchCap, minUnitPrice, ceiling,
             qty => BisectBestPrice(ctx, product, qty, floorInt, ceiling) is int best ? (float?)best : null);
 
         if (result.Trace.Count == 0)
@@ -110,20 +122,7 @@ internal static class CounterOfferEngine
             return false; // CouldNotEvaluate
         }
 
-        // Once truncation lands on a quantity where DeadZoneAlwaysRejects holds, every further
-        // candidate is at an even larger qty — and IsDeadZoneQty never turns back off as qty grows
-        // (num5 only decreases past that point) — so every one of them is provably Infeasible too.
-        // The governor stopping the climb there is then not a gap: nothing unevaluated could have
-        // been Feasible or BelowMinProfit, so the winner/verdict already found is final, not a lower
-        // bound (PR #14 review, round 8 — the naive "Truncated ⇒ lower bound" framing is wrong
-        // specifically in this case, which is also the only case where MaxCandidates is actually
-        // reachable: truncation requires roundingMultiple <= 3, and origQty*3 is small enough in
-        // practice that the climb is already deep in the dead zone by candidate 256).
-        bool truncationIsSound = result.Truncated
-            && ProbabilityFormula.IsDeadZoneQty(result.Trace[^1].Quantity, r.Quantity)
-            && ProbabilityFormula.DeadZoneAlwaysRejects(ctx.ValueProposition0, ctx.ProductEnjoyment, ctx.MaxAddictionRelation);
-
-        LogTrace(r, product, Settings.RoundingMultiple, minUnitPrice, result, truncationIsSound);
+        LogTrace(r, product, Settings.RoundingMultiple, minUnitPrice, result);
 
         var floorCandidate = result.Trace[0];
 
@@ -146,24 +145,27 @@ internal static class CounterOfferEngine
 
             // A truncated search stopped at MaxCandidates before the price-ceiling bound closed
             // on its own, so an unevaluated remainder past it still exists and isn't provably
-            // BelowMinProfit — some of it could have been Feasible. But that only leaves the
-            // verdict unresolved when the floor itself never produced a usable price AND the
-            // remainder isn't itself provably empty (truncationIsSound, computed above): the floor
-            // is always Trace[0], always evaluated first and in full regardless of what the
-            // governor did up to MaxCandidates-1 steps later, so a BelowMinProfit floor is a complete, sound verdict
+            // BelowMinProfit — some of it could have been Feasible. That only leaves the verdict
+            // unresolved when the floor itself never produced a usable price: the floor is always
+            // Trace[0], always evaluated first and in full regardless of what the governor did up
+            // to MaxCandidates-1 steps later, so a BelowMinProfit floor is a complete, sound verdict
             // on its own — the exact one the pre-search single-floor code on main would have
             // declined on. Routing that case to CouldNotEvaluate would turn a fully-evaluated
             // decline into a deal that sits unanswered forever (truncation is deterministic for a
             // given deal, so it never resolves on retry); the un-walked remainder is only a missed
-            // *upside* (a possibly-better candidate further out) — unless truncationIsSound rules
-            // even that out, in which case there's no upside left to miss and this is a fully
-            // resolved verdict, not an incomplete search. Only an Infeasible floor means no
+            // *upside* (a possibly-better candidate further out). Only an Infeasible floor means no
             // candidate the pre-search code would ever have sent was evaluated at all — that's the
             // case this guards. A Found result that's also Truncated is left alone here regardless:
             // it did find a genuine Feasible candidate clearing the min-profit floor, just possibly
             // not the single best one, which is a quality gap the Truncated warning below already
             // surfaces, not a reason to withhold an otherwise-valid counter.
-            if (result.Truncated && floorCandidate.Outcome == QuantitySearch.CandidateOutcome.Infeasible && !truncationIsSound)
+            //
+            // searchCap now stops the climb before it ever enters a provably-always-Infeasible dead
+            // zone (see TryPropose above), so a Truncated result here means the governor actually
+            // fired inside the live range — no dead-zone-soundness case to carve out anymore
+            // (PR #14 review, round 9; round 8's truncationIsSound existed only because the climb
+            // was still allowed to walk into that region).
+            if (result.Truncated && floorCandidate.Outcome == QuantitySearch.CandidateOutcome.Infeasible)
             {
                 MelonLogger.Warning(
                     $"AAD: engine — quantity search for {product.ID} hit the candidate limit before the " +
@@ -212,7 +214,12 @@ internal static class CounterOfferEngine
     // depending on vp2 (and so on price) altogether — ProbabilityFormula.DeadZoneAlwaysRejects
     // checks whether it has, using only per-deal constants captured in ctx, none of which are
     // qty-dependent. When it has, this candidate is Infeasible at every price, so even the single
-    // floorInt probe above is skipped: 0 interop calls instead of 1 (PR #14 review, round 8).
+    // floorInt probe above is skipped: 0 interop calls instead of 1 (PR #14 review, round 8). Since
+    // round 9, TryPropose's searchCap keeps the climb from reaching such a qty at all in the common
+    // case, so in practice this only fires for the one candidate searchCap's Math.Max deliberately
+    // still evaluates — the rounding floor itself, when it's already past the dead zone. Kept as
+    // its own check (not folded into the caller) because that candidate still needs to come back
+    // Infeasible, not just unwalked.
     private static int? BisectBestPrice(
         ProbabilityContext ctx, ProductDefinition product, int qty, int floorInt, int ceiling)
     {
@@ -246,8 +253,7 @@ internal static class CounterOfferEngine
     // BoundedByMaxCandidates pins Found && Truncated both true), so MaxCandidates + 3 lines, not
     // + 2, is the absolute worst case.
     private static void LogTrace(
-        DealRequest r, ProductDefinition product, int multiple, float minUnitPrice, QuantitySearch.Result result,
-        bool truncationIsSound)
+        DealRequest r, ProductDefinition product, int multiple, float minUnitPrice, QuantitySearch.Result result)
     {
         if (multiple <= 0 || result.Trace.Count == 0) return;
 
@@ -283,21 +289,10 @@ internal static class CounterOfferEngine
 
         if (result.Truncated)
         {
-            if (truncationIsSound)
-            {
-                MelonLogger.Msg(
-                    $"AAD: {name} — qty search hit the internal candidate limit ({QuantitySearch.MaxCandidates}) " +
-                    "before the price range was exhausted, but every unevaluated quantity is past the point " +
-                    "where acceptance stops depending on price at all and is provably unacceptable there — " +
-                    "the result above is the true best, not just a lower bound.");
-            }
-            else
-            {
-                MelonLogger.Warning(
-                    $"AAD: {name} — qty search hit the internal candidate limit ({QuantitySearch.MaxCandidates}) " +
-                    "before the price range was exhausted; the result above is only a lower bound on the true " +
-                    "best, not necessarily the best itself.");
-            }
+            MelonLogger.Warning(
+                $"AAD: {name} — qty search hit the internal candidate limit ({QuantitySearch.MaxCandidates}) " +
+                "before the price range was exhausted; the result above is only a lower bound on the true " +
+                "best, not necessarily the best itself.");
         }
 
         if (result.Found)

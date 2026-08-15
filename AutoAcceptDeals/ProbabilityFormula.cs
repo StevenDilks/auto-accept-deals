@@ -104,4 +104,23 @@ internal static class ProbabilityFormula
         float num11 = Lerp(0f, 0.2f, maxAddictionRelation);
         return num9 > num11;
     }
+
+    // Smallest qty in [1, cap] where IsDeadZoneQty holds, or cap+1 if none does. IsDeadZoneQty is
+    // monotone non-decreasing in qty (num5 only decreases past the point it first hits zero), so
+    // bisection is exact. Callers can use this to cap a climb before it ever enters the dead zone,
+    // instead of walking into it one candidate at a time and discovering the boundary the hard way —
+    // it still only ever asks IsDeadZoneQty, never derives the ratio threshold itself (PR #14
+    // review, round 9).
+    internal static int FirstDeadZoneQty(int origQty, int cap)
+    {
+        if (!IsDeadZoneQty(cap, origQty)) return cap + 1;
+
+        int lo = 1, hi = cap;
+        while (lo < hi)
+        {
+            int mid = lo + (hi - lo) / 2;
+            if (IsDeadZoneQty(mid, origQty)) hi = mid; else lo = mid + 1;
+        }
+        return lo;
+    }
 }

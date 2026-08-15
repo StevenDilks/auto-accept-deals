@@ -256,7 +256,8 @@ internal static class SettingsPanel
 
     private static void DrawProfitSection()
     {
-        GUILayout.Label($"Min profit: {Settings.MinProfitPercent:F0}%   (required per-unit price increase over the customer's ask; decline instead of countering below this)");
+        var profitSuffix = Settings.MinProfitPercent <= -100f ? " — no per-unit floor" : "";
+        GUILayout.Label($"Min profit: {Settings.MinProfitPercent:F0}%{profitSuffix}   (required per-unit price increase over the customer's ask; decline instead of countering below this)");
         GUILayout.BeginHorizontal();
         GUILayout.Space(20f);
         if (GUILayout.Button("-5", GUILayout.Width(40f))) AdjustMinProfit(-5f);
@@ -494,9 +495,9 @@ internal static class SettingsPanel
 
     private static void AdjustMinProfit(float delta)
     {
-        // Settings.SetMinProfitPercent requires > -100 (see its comment); clamp just above that
-        // so repeated -5/-1 clicks can't throw.
-        var v = Math.Max(-99f, Settings.MinProfitPercent + delta);
+        // Settings.SetMinProfitPercent requires >= -100 (see its comment) — -100 itself is a valid,
+        // reachable setting (no per-unit floor), so clamp there rather than just above it.
+        var v = Math.Max(-100f, Settings.MinProfitPercent + delta);
         if (v != Settings.MinProfitPercent) Settings.SetMinProfitPercent(v);
     }
 
