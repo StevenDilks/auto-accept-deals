@@ -39,26 +39,23 @@ internal static class CounterOfferEngine
     // qty == origQty, but the value-proposition term generally rises with qty at a fixed price,
     // so feasibility isn't monotone in qty either direction. TryPropose now climbs
     // QuantitySearch.FindBest over multiples of RoundingMultiple, filtering each candidate
-    // through the existing min-profit-per-unit guard and picking the highest *per-unit* price
-    // among the survivors, unless it fails to clear the margin baseline's own per-unit price by a
-    // material margin — the baseline is the floor when it's Feasible, otherwise the first
-    // Feasible candidate the climb finds, since a BelowMinProfit floor with a later Feasible
-    // candidate is a common shape (rounding moves qty away from origQty, which the model
-    // generally penalizes), not a corner case that can skip the margin entirely (not the highest
-    // total — that would systematically pick the largest feasible quantity, i.e. the worst
-    // per-unit survivor, defeating the guard; and not a bare per-unit maximum either — that would
-    // let a fractional-cent "improvement" justify a much larger order; and the margin is checked
-    // once against the fixed baseline rather than incrementally against a moving incumbent, which
-    // keeps the outcome independent of the rounding step whenever the floor itself is Feasible —
-    // when it isn't, the baseline is the first Feasible candidate the climb happens to land on, so
-    // a coarser step can still land on a different winner than a finer one would; see
-    // QuantitySearch for why that's an accepted limitation of the fallback, not a bug). Any
-    // Feasible winner already clears minUnitPrice by construction, so the result can only match
-    // or beat the floor whenever the floor itself wasn't Feasible; when it was, it doubles as the
-    // baseline and the margin check governs directly. The climb no longer stops at the first
-    // infeasible reading (see QuantitySearch) — it's bounded instead by an exact price ceiling
-    // that tightens once a Feasible candidate is found, plus a hard candidate-count governor as a
-    // backstop.
+    // through the existing min-profit-per-unit guard and picking the highest *total* price among
+    // the survivors — that is the stated goal (highest revenue at 100% acceptance, subject to the
+    // multiple and min-profit constraints; number of multiples climbed and per-unit price are not
+    // factors in their own right). The climb doesn't stop at the first infeasible reading, nor at
+    // the first total-price decrease (see QuantitySearch) — it's bounded instead by an exact price
+    // ceiling, a min-profit-unreachable bound, and a hard candidate-count governor as a backstop.
+    //
+    // An earlier version of this feature maximized per-unit price with a margin against a fixed
+    // baseline instead, on the reasoning that a pure total-price objective would always pick the
+    // largest feasible quantity — the worst per-unit survivor. That reasoning was wrong: it's true
+    // in isolation, but not the goal. A larger, lower-per-unit-price order that still clears both
+    // 100% acceptance and minUnitPrice is exactly the outcome this feature exists to find; the
+    // per-unit objective was measured against real deal data and left revenue on the table on
+    // every deal where it applied (PR #14 review, round 7) by stopping the climb the moment no
+    // future candidate could beat the current best on a *per-unit* basis, even though a lower-
+    // unit-price, higher-total candidate further up the climb — already being evaluated — would
+    // have won under the actual goal.
 
     public static bool TryPropose(DealRequest r, out CounterProposal proposal, out CounterOfferFailureReason reason)
     {
@@ -93,13 +90,13 @@ internal static class CounterOfferEngine
         if (ceiling <= floorInt)
             return false; // CouldNotEvaluate — degenerate search range
 
-        // Guards against sending a technically-100%-probability counter that isn't worth making.
-        // Compared per-unit rather than as a total-dollar bump — otherwise a rounding-inflated
-        // quantity can clear a total-price floor while the per-unit price actually drops (e.g.
-        // 90 for 2 units -> 105 for 5 units is +17% total but -53% per unit). Each climbed
-        // candidate is filtered by this floor, and the search itself also maximizes per-unit
-        // price among the survivors (see QuantitySearch), so the result can only match or beat
-        // what the single-floor search used to produce.
+        // Guards against sending a technically-100%-probability counter that isn't worth making —
+        // a floor on per-unit price, not on total, since the search objective itself is total
+        // price (see QuantitySearch): without a per-unit floor a large enough quantity could clear
+        // a higher total while actually being a worse deal per unit than the original ask. Each
+        // climbed candidate is filtered by this floor before the search's total-price argmax ever
+        // sees it, so a winner can only be a candidate that both clears 100% acceptance and this
+        // per-unit minimum.
         float origUnitPrice = r.Payment / Math.Max(1, r.Quantity);
         float minUnitPrice = origUnitPrice * (1f + Settings.MinProfitPercent / 100f);
 
@@ -139,7 +136,7 @@ internal static class CounterOfferEngine
             // BelowMinProfit — some of it could have been Feasible. But that only leaves the
             // verdict unresolved when the floor itself never produced a usable price: the floor
             // is always Trace[0], always evaluated first and in full regardless of what the
-            // governor did 49 steps later, so a BelowMinProfit floor is a complete, sound verdict
+            // governor did up to MaxCandidates-1 steps later, so a BelowMinProfit floor is a complete, sound verdict
             // on its own — the exact one the pre-search single-floor code on main would have
             // declined on. Routing that case to CouldNotEvaluate would turn a fully-evaluated
             // decline into a deal that sits unanswered forever (truncation is deterministic for a
@@ -187,11 +184,23 @@ internal static class CounterOfferEngine
     // Owns ctx.Qty for the duration of the search — the caller must not also assign it, since vp2
     // (computed from the qty parameter) and ctx.Probability (which reads ctx.Qty) would otherwise
     // have two independent, easily-desynced sources of truth for the same quantity.
+    //
+    // Probes floorInt first: p == 1 is monotone non-decreasing in vp2 at fixed qty (every gate
+    // and the final formula in ProbabilityFormula.Compute either ignores vp2 or moves toward
+    // acceptance as vp2 rises), and vp2 is decreasing in unit price, so floorInt — the cheapest
+    // price in range — is where vp2, and so p, is highest. If p < 1 there, no price in [floorInt,
+    // ceiling] can reach p == 1, so the full bisection is skipped. This matters most for
+    // Infeasible candidates the quantity climb evaluates and discards (PR #14 review, round 7):
+    // it turns each one from ~17 interop calls into 1.
     private static int? BisectBestPrice(
         ProbabilityContext ctx, ProductDefinition product, int qty, int floorInt, int ceiling)
     {
         ctx.Qty = qty;
-        int lo = floorInt, hi = ceiling, best = -1;
+
+        float floorVp2 = Customer.GetValueProposition(product, floorInt / (float)qty);
+        if (ctx.Probability(floorInt, floorVp2) < 1.0f) return null;
+
+        int lo = floorInt + 1, hi = ceiling, best = floorInt;
         while (lo <= hi)
         {
             int mid = lo + (hi - lo) / 2;
@@ -199,7 +208,7 @@ internal static class CounterOfferEngine
             float p = ctx.Probability(mid, vp2);
             if (p >= 1.0f) { best = mid; lo = mid + 1; } else hi = mid - 1;
         }
-        return best >= 0 ? best : (int?)null;
+        return best;
     }
 
     // Verbose per-candidate trace, deliberately louder than the mod's steady-state logging so the
@@ -210,11 +219,7 @@ internal static class CounterOfferEngine
     // candidate lines, plus 1 Truncated warning when the governor fired and 1 baseline/summary
     // line when Found — those last two aren't exclusive (FindBest_EvaluateNeverReturnsNull_
     // BoundedByMaxCandidates pins Found && Truncated both true), so MaxCandidates + 3 lines, not
-    // + 2, is the absolute worst case. The price-ceiling bound that would otherwise cap Trace.Count
-    // below MaxCandidates is a ratio (priceCeiling / threshold, see QuantitySearch), not a fixed
-    // count, so a low minUnitPrice — or a margin baseline not far above it — can leave it loose
-    // whether or not a Feasible candidate has been found, and MaxCandidates + 3 lines is reachable
-    // either way.
+    // + 2, is the absolute worst case.
     private static void LogTrace(
         DealRequest r, ProductDefinition product, int multiple, float minUnitPrice, QuantitySearch.Result result)
     {
@@ -222,25 +227,9 @@ internal static class CounterOfferEngine
 
         var name = r.Customer.NPC?.FullName ?? "<unknown>";
         var floorCandidate = result.Trace[0];
-        float marginPercent = (QuantitySearch.MinImprovementRatio - 1f) * 100f;
-        // The margin only applies once a Feasible candidate has been found (result.MarginBaseline
-        // non-null) — not only when the floor itself is Feasible: a BelowMinProfit floor with a
-        // later Feasible candidate still gets a margin, measured against that later candidate (see
-        // QuantitySearch.FindBest). Naming the baseline's own qty, rather than always saying
-        // "floor", keeps the line accurate in that case instead of pointing at the wrong candidate.
-        string marginClause = result.MarginBaseline is { } mb
-            ? $", needs >{marginPercent:F0}% over qty{mb.Quantity} to beat it"
-            : "";
         MelonLogger.Msg(
             $"AAD: {name} — qty search for {product.ID}: origQty={r.Quantity}, floor={floorCandidate.Quantity}, " +
-            $"step={multiple}, cap={QuantityMath.QuantityCap}, need ≥{minUnitPrice:F2}/unit{marginClause}");
-
-        // result.BestFeasible is the exact candidate FindBest's own margin check weighed against
-        // result.MarginBaseline — reading both here instead of re-deriving an argmax from Trace
-        // keeps this marker provably in sync with the selection it's explaining, rather than a
-        // second, independently-written loop that could silently disagree if either one's
-        // tie-break or filter changes.
-        var rawBest = result.BestFeasible;
+            $"step={multiple}, cap={QuantityMath.QuantityCap}, need ≥{minUnitPrice:F2}/unit");
 
         foreach (var c in result.Trace)
         {
@@ -259,18 +248,6 @@ internal static class CounterOfferEngine
             {
                 marker = "  ← best";
             }
-            else if (rawBest is { } rb && c.Quantity == rb.Quantity && result.MarginBaseline is { } baseline)
-            {
-                // F2, not F1: the selection check is `<=`, so an exact-margin candidate still
-                // loses. At F1 that boundary rounds to the same number as the threshold itself
-                // ("+2.0% over floor, under 2% margin" — reads as contradicting its own rule);
-                // F2 keeps the rare true-tie case legible instead, and "needs >" instead of
-                // "under" states the actual comparison rather than one that can read as satisfied.
-                // Measured against result.MarginBaseline, not floorCandidate — they differ
-                // whenever the floor itself wasn't Feasible (see QuantitySearch.FindBest).
-                float pctOverBaseline = (c.UnitPrice / baseline.UnitPrice - 1f) * 100f;
-                marker = $"  +{pctOverBaseline:F2}% over qty{baseline.Quantity}, needs >{marginPercent:F0}% to beat it, skipped";
-            }
             else
             {
                 marker = "";
@@ -282,7 +259,8 @@ internal static class CounterOfferEngine
         {
             MelonLogger.Warning(
                 $"AAD: {name} — qty search hit the internal candidate limit ({QuantitySearch.MaxCandidates}) " +
-                "before the price range was exhausted; the result above may not be the true best.");
+                "before the price range was exhausted; the result above is only a lower bound on the true " +
+                "best, not necessarily the best itself.");
         }
 
         if (result.Found)

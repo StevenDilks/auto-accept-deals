@@ -10,10 +10,8 @@ public class QuantitySearchTests
         => qty => totals.TryGetValue(qty, out var total) ? total : (float?)null;
 
     [Fact]
-    public void FindBest_UnitPriceClimbsToBoundary_PicksLastFeasibleCandidate()
+    public void FindBest_TotalPriceClimbsToBoundary_PicksLastFeasibleCandidate()
     {
-        // Unit price rises with each step: 11, 12, 13/unit — qty20's 13.00/unit clears the 2%
-        // margin over the floor's 11.00/unit once, at the end (there's no per-step margin check).
         var curve = Curve(new() { [10] = 110f, [15] = 180f, [20] = 260f }); // 25 -> infeasible, cap stops the climb there
         var result = QuantitySearch.FindBest(startQty: 10, multiple: 5, cap: 25, minUnitPrice: 0f, priceCeiling: float.MaxValue, curve);
 
@@ -23,58 +21,54 @@ public class QuantitySearchTests
     }
 
     [Fact]
-    public void FindBest_UnitPricePeaksThenDips_PicksPeakNotLastFeasible()
+    public void FindBest_TotalPricePeaksThenDips_PicksPeakNotLastFeasible()
     {
-        // Unit price: 10, 14 (peak), 13, 12 — highest total ($300 @ qty25) is NOT the highest unit price.
-        var curve = Curve(new() { [10] = 100f, [15] = 210f, [20] = 260f, [25] = 300f }); // 30 -> infeasible
+        var curve = Curve(new() { [10] = 100f, [15] = 210f, [20] = 260f, [25] = 300f, [30] = 250f }); // dips at 30
         var result = QuantitySearch.FindBest(startQty: 10, multiple: 5, cap: 30, minUnitPrice: 0f, priceCeiling: float.MaxValue, curve);
 
         Assert.True(result.Found);
-        Assert.Equal(15, result.Quantity);
-        Assert.Equal(210f, result.TotalPrice);
+        Assert.Equal(25, result.Quantity);
+        Assert.Equal(300f, result.TotalPrice);
     }
 
-    // Reproduces the exact scenario from PR #14 review feedback: a larger quantity clears a higher
-    // *total* price while its *unit* price is worse than the floor's — the search must prefer the
-    // floor's unit price, not chase the larger total (that would defeat the min-profit guard).
+    // The objective is total revenue, not per-unit price (PR #14 review, round 7): a larger
+    // quantity that clears a strictly higher total while its *unit* price is worse than the
+    // floor's must still win — the min-profit floor is a filter candidates must clear, not
+    // something the search maximizes past clearing it. ("Irene Meadows" shape from the review's
+    // measured data: 15 @ $1511 = $100.73/unit vs 30 @ $2262 = $75.40/unit.)
     [Fact]
-    public void FindBest_HigherTotalButLowerUnitPrice_PrefersHigherUnitPriceFloor()
+    public void FindBest_HigherTotalWithLowerUnitPrice_StillWins()
     {
-        var curve = Curve(new() { [10] = 500f, [15] = 530f }); // 50.00/unit vs 35.33/unit; 20 -> infeasible
-        var result = QuantitySearch.FindBest(startQty: 10, multiple: 5, cap: 20, minUnitPrice: 33f, priceCeiling: float.MaxValue, curve);
+        var curve = Curve(new() { [15] = 1511f, [30] = 2262f }); // 100.73/unit vs 75.40/unit; 45 -> infeasible
+        var result = QuantitySearch.FindBest(startQty: 15, multiple: 15, cap: 30, minUnitPrice: 0f, priceCeiling: float.MaxValue, curve);
 
         Assert.True(result.Found);
-        Assert.Equal(10, result.Quantity);
-        Assert.Equal(500f, result.TotalPrice);
+        Assert.Equal(30, result.Quantity);
+        Assert.Equal(2262f, result.TotalPrice);
     }
 
-    // Reproduces a second scenario from review feedback: a larger quantity clears a *nominally*
-    // higher unit price, but the gain is a rounding error ($0.02/unit) that doesn't justify a 5x
-    // larger order. MinImprovementRatio exists precisely to reject this — as a single comparison
-    // against the fixed margin baseline (the floor, since it's Feasible here) once the climb ends,
-    // not against a moving incumbent.
+    // Total price is not assumed monotone in qty: a mid-climb dip must not be mistaken for the end
+    // of useful candidates — the climb keeps walking past it and a later candidate can still win.
+    // ("Jackie Stevenson" shape from the review's measured data: 10:$799, 15:$609.)
     [Fact]
-    public void FindBest_ImmaterialUnitPriceGain_DoesNotDisplaceBaseline()
+    public void FindBest_NonMonotoneTotal_DoesNotStopAtFirstDecrease()
     {
-        var curve = Curve(new() { [10] = 330f, [50] = 1651f }); // 33.00/unit vs 33.02/unit
-        var result = QuantitySearch.FindBest(startQty: 10, multiple: 40, cap: 50, minUnitPrice: 33f, priceCeiling: float.MaxValue, curve);
+        var curve = Curve(new() { [10] = 799f, [15] = 609f, [20] = 850f });
+        var result = QuantitySearch.FindBest(startQty: 10, multiple: 5, cap: 20, minUnitPrice: 0f, priceCeiling: float.MaxValue, curve);
 
         Assert.True(result.Found);
-        Assert.Equal(10, result.Quantity);
-        Assert.Equal(330f, result.TotalPrice);
-
-        // BestFeasible names the raw argmax that lost the margin check (qty50), distinct from the
-        // floor that actually won (qty10) — callers explaining the trace (e.g. LogTrace) need this
-        // exact value, not a re-derived one, to point at the right candidate.
-        Assert.NotNull(result.BestFeasible);
-        Assert.Equal(50, result.BestFeasible!.Value.Quantity);
+        Assert.Equal(20, result.Quantity);
+        Assert.Equal(850f, result.TotalPrice);
     }
 
+    // Equal totals tie -- strict `>` when updating the running best keeps the lower quantity, the
+    // only tie-break the total-revenue goal doesn't dictate (no reason to send a larger order for
+    // the same money).
     [Fact]
-    public void FindBest_EqualUnitPriceAcrossClimb_PrefersLowerQuantity()
+    public void FindBest_EqualTotalsAcrossClimb_PrefersLowerQuantity()
     {
-        var curve = Curve(new() { [10] = 100f, [15] = 150f, [20] = 200f }); // all exactly 10.00/unit; 25 -> infeasible
-        var result = QuantitySearch.FindBest(startQty: 10, multiple: 5, cap: 25, minUnitPrice: 0f, priceCeiling: float.MaxValue, curve);
+        var curve = Curve(new() { [10] = 100f, [20] = 100f }); // 30 -> infeasible
+        var result = QuantitySearch.FindBest(startQty: 10, multiple: 10, cap: 20, minUnitPrice: 0f, priceCeiling: float.MaxValue, curve);
 
         Assert.True(result.Found);
         Assert.Equal(10, result.Quantity);
@@ -118,7 +112,10 @@ public class QuantitySearchTests
         Assert.Equal(QuantitySearch.CandidateOutcome.Infeasible, result.Trace[2].Outcome);
 
         // 10.00/unit (qty10) beats 9.33/unit (qty15) -- BestBelowMinProfit reports the better of
-        // the two BelowMinProfit candidates, not just the first one.
+        // the two BelowMinProfit candidates, not just the first one. This is still a per-unit
+        // comparison (see QuantitySearch.Result.BestBelowMinProfit) even though the search's own
+        // objective is total price -- a decline message reports how close the search got to
+        // clearing minUnitPrice, which is a per-unit question.
         Assert.NotNull(result.BestBelowMinProfit);
         Assert.Equal(10, result.BestBelowMinProfit!.Value.Quantity);
     }
@@ -126,8 +123,6 @@ public class QuantitySearchTests
     [Fact]
     public void FindBest_MidRunBelowMinProfitThenLaterClears_LaterCandidateWins()
     {
-        // minUnitPrice=10 -> qty10 needs >=100 (ok, 10.00/u), qty15 needs >=150 (fails, total=140),
-        // qty20 needs >=200 (ok, total=220, 11.00/u > floor's 10.00/u by more than the 2% margin).
         var curve = Curve(new() { [10] = 100f, [15] = 140f, [20] = 220f }); // 25 -> infeasible
         var result = QuantitySearch.FindBest(startQty: 10, multiple: 5, cap: 20, minUnitPrice: 10f, priceCeiling: float.MaxValue, curve);
 
@@ -201,9 +196,6 @@ public class QuantitySearchTests
     [Fact]
     public void FindBest_NeverProposesQuantityAboveCapOrOffTheRoundingGrid()
     {
-        // Unit price rises with each step (10.0, 10.5, 11.0) so the cap (qty1000, 11.00/unit)
-        // wins as the argmax and then clears the 2% margin over the floor's 10.00/unit once, at
-        // the end -- it's the genuine winner, not just the last candidate evaluated.
         var curve = Curve(new() { [990] = 9900f, [995] = 10447.5f, [1000] = 11000f }); // 1005 would exceed cap
         var result = QuantitySearch.FindBest(startQty: 990, multiple: 5, cap: 1000, minUnitPrice: 0f, priceCeiling: float.MaxValue, curve);
 
@@ -238,26 +230,22 @@ public class QuantitySearchTests
         Assert.Equal(25, result.Trace[^1].Quantity);
     }
 
-    // Once a Feasible candidate exists, the bound tightens against
-    // max(bestFeasible.UnitPrice, marginBaseline.UnitPrice * MinImprovementRatio) instead of
-    // staying anchored to the looser minUnitPrice floor. Every candidate here ties at 10.5/unit,
-    // so the strict `>` in the trace loop never displaces qty=10 as bestFeasible -- and since
-    // qty=10 is also Feasible, it's the margin baseline too, so the two terms of that max are
-    // 10.5 and 10.5*1.02=10.71, and 10.71 wins. The climb should stop well short of where the
-    // minUnitPrice-anchored bound would (qty=30, per the test above), since nothing beyond
-    // qty=10 can possibly win once that tighter bound is in place.
+    // Once a Feasible candidate's TotalPrice reaches priceCeiling, no future candidate can ever
+    // exceed it (evaluate can never return more than priceCeiling), so the climb stops there
+    // regardless of qty or unit price.
     [Fact]
-    public void FindBest_PriceCeilingBound_OnceFound_TightensAgainstIncumbent()
+    public void FindBest_PriceCeilingBound_OnceFeasibleReachesCeiling_Stops()
     {
         var result = QuantitySearch.FindBest(
             startQty: 10, multiple: 5, cap: 1000, minUnitPrice: 10f, priceCeiling: 250f,
             evaluate: qty => System.MathF.Min(250f, qty * 10.5f));
 
         Assert.True(result.Found);
-        Assert.Equal(10, result.Quantity);
-        Assert.Equal(105f, result.TotalPrice);
-        Assert.Equal(3, result.Trace.Count);
-        Assert.Equal(20, result.Trace[^1].Quantity);
+        Assert.Equal(25, result.Quantity);
+        Assert.Equal(250f, result.TotalPrice);
+        Assert.Equal(4, result.Trace.Count);
+        Assert.Equal(25, result.Trace[^1].Quantity);
+        Assert.False(result.Truncated);
     }
 
     // Coverage for the runaway case: an `evaluate` that never returns null (several early-exit
@@ -279,112 +267,19 @@ public class QuantitySearchTests
 
     // The false-positive case PR #14 review caught: when the natural exit (cap reached, or the
     // price-ceiling bound) lands on exactly the same candidate as the MaxCandidates governor, the
-    // governor must not get credit for a stop it didn't cause. startQty=20, multiple=20, cap=1000
-    // walks exactly 50 candidates (20, 40, ..., 1000); the climb should end because `next` (1020)
-    // exceeds the cap, not because the trace hit MaxCandidates on the same step.
+    // governor must not get credit for a stop it didn't cause. startQty=20, multiple=20 walks
+    // exactly MaxCandidates candidates (20, 40, ..., 20*MaxCandidates); the climb should end
+    // because `next` exceeds the cap, not because the trace hit MaxCandidates on the same step.
     [Fact]
     public void FindBest_RangeExhaustsOnExactlyMaxCandidates_NotReportedAsTruncated()
     {
+        int cap = 20 * QuantitySearch.MaxCandidates;
         var result = QuantitySearch.FindBest(
-            startQty: 20, multiple: 20, cap: 1000, minUnitPrice: 0f, priceCeiling: float.MaxValue,
+            startQty: 20, multiple: 20, cap: cap, minUnitPrice: 0f, priceCeiling: float.MaxValue,
             evaluate: qty => 1f); // flat, deliberately below any real unit price so nothing but qty20 ever wins
 
         Assert.Equal(QuantitySearch.MaxCandidates, result.Trace.Count);
-        Assert.Equal(1000, result.Trace[^1].Quantity);
+        Assert.Equal(cap, result.Trace[^1].Quantity);
         Assert.False(result.Truncated);
-    }
-
-    // The step-size-dependence bug PR #14 review caught: measuring the margin against whichever
-    // candidate is the running per-unit best (instead of the fixed floor) makes the outcome depend
-    // on which multiples the rounding step happens to sample. With multiple=5, qty15's 33.70/unit
-    // clears the margin over the floor (33.00) and would, under incumbent-based margining, become
-    // the new incumbent -- then qty20's 34.30/unit fails to clear a fresh margin over *that*
-    // (33.70 * 1.02 = 34.37), losing to a worse per-unit result than multiple=10 finds by skipping
-    // straight from the floor to qty20. Both must converge on the true best: qty20 @ 34.30/unit.
-    [Theory]
-    [InlineData(5)]
-    [InlineData(10)]
-    public void FindBest_MarginAppliesAgainstFloorNotRunningIncumbent_IndependentOfStepSize(int multiple)
-    {
-        var curve = Curve(new() { [10] = 330f, [15] = 505.5f, [20] = 686f }); // 33.00 / 33.70 / 34.30 per unit
-        var result = QuantitySearch.FindBest(
-            startQty: 10, multiple: multiple, cap: 20, minUnitPrice: 30f, priceCeiling: float.MaxValue, curve);
-
-        Assert.True(result.Found);
-        Assert.Equal(20, result.Quantity);
-        Assert.Equal(686f, result.TotalPrice);
-    }
-
-    // The bound-staleness bug PR #14 review caught: once the floor is Feasible but hasn't cleared
-    // its own margin, a future candidate has to beat floor.UnitPrice * MinImprovementRatio (10.2)
-    // to change the winner, not just floor.UnitPrice (10) — beating 10 without clearing 10.2 still
-    // loses to the floor at the end, so evaluating it is wasted work. Flat 10/unit curve means
-    // bestFeasible never moves off the floor, so needed stays at 10.2 throughout. With
-    // priceCeiling=306: the margin-aware bound closes at next=30 (10.2*30=306, stops after qty25,
-    // 4 candidates); the pre-fix bound (needed=10, ignoring the margin) wouldn't have closed until
-    // next=35 (10*35=350), evaluating qty30 too.
-    [Fact]
-    public void FindBest_PriceCeilingBound_AccountsForFloorMargin_NotJustRawIncumbent()
-    {
-        var result = QuantitySearch.FindBest(
-            startQty: 10, multiple: 5, cap: 1000, minUnitPrice: 0f, priceCeiling: 306f,
-            evaluate: qty => System.MathF.Min(306f, qty * 10f));
-
-        Assert.True(result.Found);
-        Assert.Equal(10, result.Quantity);
-        Assert.Equal(4, result.Trace.Count);
-        Assert.Equal(25, result.Trace[^1].Quantity);
-        Assert.False(result.Truncated);
-    }
-
-    // The margin-regression bug PR #14 review caught: gating the margin baseline on
-    // `floorCandidate.Outcome == Feasible` turned the margin off entirely whenever the floor
-    // itself wasn't Feasible -- exactly the climbs where the largest quantity jumps are
-    // available, since rounding moves qty away from origQty and the acceptance model generally
-    // penalizes that. Here the floor (qty10) is BelowMinProfit; qty15 is the first Feasible
-    // candidate, at 33.00/unit; qty20 is the raw argmax at 33.02/unit but doesn't clear qty15's
-    // margin (33.00*1.02=33.66), so qty15 -- not qty20, and not a marginless straight argmax --
-    // must win.
-    [Fact]
-    public void FindBest_FloorNotFeasible_MarginStillAppliesAgainstFirstFeasibleCandidate()
-    {
-        var curve = Curve(new() { [10] = 300f, [15] = 495f, [20] = 660.4f }); // 30.00 / 33.00 / 33.02 per unit
-        var result = QuantitySearch.FindBest(
-            startQty: 10, multiple: 5, cap: 20, minUnitPrice: 33f, priceCeiling: float.MaxValue, curve);
-
-        Assert.True(result.Found);
-        Assert.Equal(15, result.Quantity);
-        Assert.Equal(495f, result.TotalPrice);
-
-        Assert.NotNull(result.MarginBaseline);
-        Assert.Equal(15, result.MarginBaseline!.Value.Quantity);
-        Assert.NotNull(result.BestFeasible);
-        Assert.Equal(20, result.BestFeasible!.Value.Quantity);
-    }
-
-    // The grid-sensitivity PR #14 review pointed out as an unpinned edge of the fallback above:
-    // when the floor isn't Feasible, the margin baseline is "the first Feasible candidate the
-    // climb finds" -- which depends on which multiples the step size happens to sample, unlike
-    // the Feasible-floor case (see FindBest_MarginAppliesAgainstFloorNotRunningIncumbent_
-    // IndependentOfStepSize, which only covers Feasible floors and so never exercised this).
-    // Same curve as FindBest_FloorNotFeasible_MarginStillAppliesAgainstFirstFeasibleCandidate --
-    // at multiple=5 that test lands on qty15 (33.00/unit) as the baseline, which qty20's
-    // 33.02/unit fails to clear. Here, multiple=10 skips qty15 entirely: qty20 is the *first*
-    // Feasible candidate the coarser grid ever samples, so it is simultaneously its own baseline
-    // and its own argmax and wins outright -- the exact "coarser grid accepts what a finer grid
-    // would reject" shape the class doc now calls out as an accepted limitation, not a bug.
-    [Fact]
-    public void FindBest_FloorNotFeasible_CoarserGridAcceptsCandidateFinerGridRejects()
-    {
-        var curve = Curve(new() { [10] = 300f, [15] = 495f, [20] = 660.4f }); // 30.00 / 33.00 / 33.02 per unit
-        var result = QuantitySearch.FindBest(
-            startQty: 10, multiple: 10, cap: 20, minUnitPrice: 33f, priceCeiling: float.MaxValue, curve);
-
-        Assert.True(result.Found);
-        Assert.Equal(20, result.Quantity);
-        Assert.Equal(660.4f, result.TotalPrice);
-
-        Assert.NotNull(result.MarginBaseline);
-        Assert.Equal(20, result.MarginBaseline!.Value.Quantity);
     }
 }
