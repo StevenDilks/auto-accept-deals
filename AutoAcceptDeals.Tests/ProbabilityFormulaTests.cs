@@ -141,6 +141,85 @@ public class ProbabilityFormulaTests
         Assert.Equal(1f, pFarther);
     }
 
+    // --- Dead zone (num5 == 0) ---
+
+    // threshold ratio is 2^(1/0.6) ~= 3.1748; origQty=10 -> ceil(31.748) = 32.
+    [Fact]
+    public void IsDeadZoneQty_JustBelowThreshold_ReturnsFalse()
+        => Assert.False(ProbabilityFormula.IsDeadZoneQty(qty: 31, origQty: 10));
+
+    [Fact]
+    public void IsDeadZoneQty_AtThreshold_ReturnsTrue()
+        => Assert.True(ProbabilityFormula.IsDeadZoneQty(qty: 32, origQty: 10));
+
+    [Fact]
+    public void IsDeadZoneQty_FarAboveThreshold_StaysTrue()
+        => Assert.True(ProbabilityFormula.IsDeadZoneQty(qty: 1000, origQty: 10));
+
+    [Fact]
+    public void IsDeadZoneQty_AtOrigQty_ReturnsFalse()
+        => Assert.False(ProbabilityFormula.IsDeadZoneQty(qty: 10, origQty: 10));
+
+    // vp0 < 0 means the vp2*num5 > vp0 gate (0 > vp0) always fires regardless of vp2 -> Compute
+    // always returns 1f at a dead-zone qty. That's the opposite of always-reject, so the method
+    // must say false here, not just "not provably true".
+    [Fact]
+    public void DeadZoneAlwaysRejects_NegativeVp0_ReturnsFalse()
+        => Assert.False(ProbabilityFormula.DeadZoneAlwaysRejects(vp0: -0.1f, productEnjoyment: 0.5f, maxAddictionRelation: 0f));
+
+    // productEnjoyment < 0 with vp0 >= 0 means num6 < 0, so num7 (== 0 here) > num6 always fires ->
+    // Compute always returns 1f once vp2 clears the 0.12 pre-gate. Also not always-reject.
+    [Fact]
+    public void DeadZoneAlwaysRejects_NegativeEnjoyment_ReturnsFalse()
+        => Assert.False(ProbabilityFormula.DeadZoneAlwaysRejects(vp0: 0.5f, productEnjoyment: -0.5f, maxAddictionRelation: 0f));
+
+    // num6 small enough (or maxAddictionRelation high enough) that num9 <= num11 -> Compute always
+    // returns 1f once vp2 clears the pre-gate. Also not always-reject.
+    [Fact]
+    public void DeadZoneAlwaysRejects_Num9AtOrBelowNum11_ReturnsFalse()
+        => Assert.False(ProbabilityFormula.DeadZoneAlwaysRejects(vp0: 0.1f, productEnjoyment: 0.1f, maxAddictionRelation: 0.9f));
+
+    // vp0 and productEnjoyment both high, no addiction/relation cushion -> num9 saturates to 1,
+    // num11 = 0 -> the tail can never reach 1f for any vp2. Genuinely always-reject.
+    [Fact]
+    public void DeadZoneAlwaysRejects_HighEnjoymentAndVp0_NoAddictionCushion_ReturnsTrue()
+        => Assert.True(ProbabilityFormula.DeadZoneAlwaysRejects(vp0: 1.0f, productEnjoyment: 1.0f, maxAddictionRelation: 0f));
+
+    // Cross-check against Compute itself, not just against the hand-derived reduction above: when
+    // DeadZoneAlwaysRejects is true, Compute must never reach 1f at a dead-zone qty, for a spread of
+    // vp2 values on both sides of the 0.12 pre-gate and both sides of the spending-limit cut.
+    [Theory]
+    [InlineData(0.0f)]
+    [InlineData(0.11f)]
+    [InlineData(0.12f)]
+    [InlineData(0.5f)]
+    [InlineData(1.0f)]
+    public void DeadZoneAlwaysRejects_True_MatchesCompute_AcrossVp2Sweep(float vp2)
+    {
+        const int origQty = 10, qty = 1000; // qty far past IsDeadZoneQty's threshold for origQty=10
+        Assert.True(ProbabilityFormula.IsDeadZoneQty(qty, origQty));
+        Assert.True(ProbabilityFormula.DeadZoneAlwaysRejects(vp0: 1.0f, productEnjoyment: 1.0f, maxAddictionRelation: 0f));
+
+        float p = ProbabilityFormula.Compute(
+            price: 500f, spendingLimit: 1000f, vp0: 1.0f, vp2, productEnjoyment: 1.0f, qty, origQty, maxAddictionRelation: 0f);
+        Assert.True(p < 1f, $"Expected < 1f at vp2={vp2}, got {p}");
+    }
+
+    // Mirror check in the other direction: when DeadZoneAlwaysRejects is false, Compute can still
+    // reach 1f at a dead-zone qty for at least one vp2 — confirms the predicate isn't just
+    // conservatively false everywhere.
+    [Fact]
+    public void DeadZoneAlwaysRejects_False_ComputeCanStillReach1AtDeadZoneQty()
+    {
+        const int origQty = 10, qty = 1000;
+        Assert.True(ProbabilityFormula.IsDeadZoneQty(qty, origQty));
+        Assert.False(ProbabilityFormula.DeadZoneAlwaysRejects(vp0: 0.5f, productEnjoyment: -0.5f, maxAddictionRelation: 0f));
+
+        float p = ProbabilityFormula.Compute(
+            price: 500f, spendingLimit: 1000f, vp0: 0.5f, vp2: 0.5f, productEnjoyment: -0.5f, qty, origQty, maxAddictionRelation: 0f);
+        Assert.Equal(1f, p);
+    }
+
     // --- Representative real-world cross-check ---
 
     // Mirroring the BetterCounterOfferUI probe values that drove the Phase 6 confirmation:
