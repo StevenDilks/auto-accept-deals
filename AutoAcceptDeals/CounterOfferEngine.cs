@@ -273,12 +273,15 @@ internal static class CounterOfferEngine
             $"AAD: {name} — qty search for {product.ID}: origQty={r.Quantity}, floor={floorCandidate.Quantity}, " +
             $"step={multiple}, cap={searchCap}{capNote}, need ≥{minUnitPrice:F2}/unit");
 
-        // Only the winner and the candidate that ended the climb are logged individually — every
-        // candidate in between is real information (see QuantitySearch's monotonicity comments)
+        // Only the floor, the winner, and the candidate that ended the climb are logged individually —
+        // every candidate in between is real information (see QuantitySearch's monotonicity comments)
         // but printing all of it is what made this trace expensive to read at scale: a single deal
-        // can walk dozens of candidates below the dead zone. The two lines kept answer the two
-        // questions a trace needs to answer — what got chosen, and why the climb stopped there —
-        // without the intermediate line-per-candidate cost.
+        // can walk dozens of candidates below the dead zone. The three lines kept answer the questions
+        // a trace needs to answer — where it started, what got chosen, and why the climb stopped there
+        // — without the intermediate line-per-candidate cost.
+        // (PR #14 review, round 13 — round 11's wording said "two lines"/"two questions" and never
+        // counted the floor line two lines below, which contradicted the doc comment above LogTrace
+        // once round 12 fixed that comment to say "floor, winner, terminal".)
         LogCandidate(result.Trace[0], isBest: result.Found && result.Trace[0].Quantity == result.Quantity);
         if (result.Found)
         {
