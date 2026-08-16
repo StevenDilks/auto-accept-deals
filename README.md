@@ -5,7 +5,7 @@ A [Schedule I](https://store.steampowered.com/app/3164500/) mod that automatical
 ## What it does
 
 - **Counter-offers automatically** — responds to every customer deal with the highest price they'll accept at 100% probability, using the same deterministic formula the game uses internally (ported in `ProbabilityFormula.cs`).
-- **Rounds requested quantity** — rounds the customer's requested quantity up to a configurable multiple. Set `roundingMultiple` to `0` to pass the quantity through unchanged.
+- **Rounds requested quantity** — rounds the customer's requested quantity up to a configurable multiple, then checks further multiples above that floor for the one with the *highest total price* that still clears 100% acceptance and an optional per-unit min-profit floor (the min-profit floor is a filter candidates must clear, not something the search maximizes past clearing it — a larger order at a lower per-unit price is the intended outcome when it's worth more overall). The search is bounded by an exact price ceiling plus a hard safety cap, not by the first infeasible multiple it sees, nor by the first total-price decrease — neither acceptance nor total price is guaranteed to be monotonic in quantity. Set `roundingMultiple` to `0` to pass the quantity through unchanged.
 - **Applies a delivery location** — stamps a delivery location on each accepted contract, either one global location for all customers or a per-region location.
 - **Applies a delivery window** — assigns a delivery time window: a fixed slot, a randomly chosen slot from the four available windows, or defers to the player (lets the game's normal scheduling UI fire).
 
@@ -86,6 +86,7 @@ Stored at `<Schedule I>\UserData\AutoAcceptDeals\settings.json`. All fields can 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `roundingMultiple` | int | `0` | Round requested quantity up to the nearest multiple. `0` = pass through unchanged. |
+| `minProfitPercent` | float | `10` | Minimum per-unit price increase over the customer's ask a counter must clear to be sent; declines instead of countering below it. With `roundingMultiple` set, this is also the binding constraint on how much of the quantity search's revenue upside is reachable — the highest-*total* candidate tends to sit at the lowest per-unit price the search will still accept, so a stricter floor caps the search closer to the rounding floor and a looser one (including `0`) lets it climb further. Not just a safety net once rounding is in play — worth tuning deliberately, not just leaving at the default. `-100` is the minimum and removes the per-unit floor entirely — total revenue, maximized, full stop. |
 | `locationMode` | `Global` / `PerRegion` | `Global` | One location for all customers, or a separate location per map region. |
 | `globalLocationGuid` | string | `null` | GUID of the delivery location used in Global mode. Set via the F8 panel — auto-discovered on the first deal. |
 | `regionLocations` | object | all `null` | Region name → location GUID map for PerRegion mode. Set via the F8 panel. |
