@@ -243,15 +243,17 @@ internal static class CounterOfferEngine
         return best;
     }
 
-    // Verbose per-candidate trace, deliberately louder than the mod's steady-state logging so the
-    // climb can be validated against real deals — kept unconditional (not gated behind its own
-    // setting) per issue #10's ask for this to be the feature's primary debugging tool. Only
-    // reachable when RoundingMultiple > 0, which is not the shipped default (Settings.ApplyDefaults
-    // sets it to 0), so this costs nothing out of the box. This emits 1 header line + Trace.Count
-    // candidate lines, plus 1 Truncated warning when the governor fired and 1 baseline/summary
-    // line when Found — those last two aren't exclusive (FindBest_EvaluateNeverReturnsNull_
-    // BoundedByMaxCandidates pins Found && Truncated both true), so MaxCandidates + 3 lines, not
-    // + 2, is the absolute worst case.
+    // Trace logging, deliberately louder than the mod's steady-state logging so the climb can be
+    // validated against real deals — kept unconditional (not gated behind its own setting) per
+    // issue #10's ask for this to be the feature's primary debugging tool. Only reachable when
+    // RoundingMultiple > 0, which is not the shipped default (Settings.ApplyDefaults sets it to
+    // 0), so this costs nothing out of the box. This emits 1 header line + at most 3 candidate
+    // lines (floor, winner, terminal — deduped when they coincide), plus 1 Truncated warning when
+    // the governor fired and 1 baseline/summary line when Found — those last two aren't exclusive
+    // (FindBest_EvaluateNeverReturnsNull_BoundedByMaxCandidates pins Found && Truncated both
+    // true), so 6 lines is the absolute worst case, independent of MaxCandidates (PR #14 review,
+    // round 12 — round 10's per-candidate wording stopped being true once round 11 trimmed the
+    // loop to floor/winner/terminal).
     private static void LogTrace(
         DealRequest r, ProductDefinition product, int multiple, float minUnitPrice, int searchCap,
         QuantitySearch.Result result)
@@ -280,7 +282,10 @@ internal static class CounterOfferEngine
         LogCandidate(result.Trace[0], isBest: result.Found && result.Trace[0].Quantity == result.Quantity);
         if (result.Found)
         {
-            var best = result.Trace.First(c => c.Quantity == result.Quantity);
+            // BestFeasible is winner by construction (QuantitySearch.cs copies Quantity/TotalPrice/
+            // UnitPrice from it into Result), not just a candidate matching it — reuse it rather
+            // than re-deriving by scan (PR #14 review, round 12).
+            var best = result.BestFeasible!.Value;
             if (best.Quantity != result.Trace[0].Quantity) LogCandidate(best, isBest: true);
         }
         var terminal = result.Trace[^1];
