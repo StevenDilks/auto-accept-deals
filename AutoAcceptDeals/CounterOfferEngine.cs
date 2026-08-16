@@ -271,28 +271,23 @@ internal static class CounterOfferEngine
             $"AAD: {name} — qty search for {product.ID}: origQty={r.Quantity}, floor={floorCandidate.Quantity}, " +
             $"step={multiple}, cap={searchCap}{capNote}, need ≥{minUnitPrice:F2}/unit");
 
-        foreach (var c in result.Trace)
+        // Only the winner and the candidate that ended the climb are logged individually — every
+        // candidate in between is real information (see QuantitySearch's monotonicity comments)
+        // but printing all of it is what made this trace expensive to read at scale: a single deal
+        // can walk dozens of candidates below the dead zone. The two lines kept answer the two
+        // questions a trace needs to answer — what got chosen, and why the climb stopped there —
+        // without the intermediate line-per-candidate cost.
+        LogCandidate(result.Trace[0], isBest: result.Found && result.Trace[0].Quantity == result.Quantity);
+        if (result.Found)
         {
-            if (c.Outcome == QuantitySearch.CandidateOutcome.Infeasible)
-            {
-                MelonLogger.Msg($"AAD:   qty {c.Quantity} → no 100%-accept price, skipped");
-                continue;
-            }
-
-            string marker;
-            if (c.Outcome == QuantitySearch.CandidateOutcome.BelowMinProfit)
-            {
-                marker = "  below min profit, skipped";
-            }
-            else if (result.Found && c.Quantity == result.Quantity)
-            {
-                marker = "  ← best";
-            }
-            else
-            {
-                marker = "";
-            }
-            MelonLogger.Msg($"AAD:   qty {c.Quantity} → ${c.TotalPrice:F0} ({c.UnitPrice:F2}/unit){marker}");
+            var best = result.Trace.First(c => c.Quantity == result.Quantity);
+            if (best.Quantity != result.Trace[0].Quantity) LogCandidate(best, isBest: true);
+        }
+        var terminal = result.Trace[^1];
+        if (terminal.Quantity != result.Trace[0].Quantity &&
+            (!result.Found || terminal.Quantity != result.Quantity))
+        {
+            LogCandidate(terminal, isBest: false);
         }
 
         if (result.Truncated)
@@ -326,6 +321,20 @@ internal static class CounterOfferEngine
                     $"AAD: {name} — qty search chose {result.Quantity} @ ${result.TotalPrice:F0}; baseline " +
                     $"{floorCandidate.Quantity} would not have been counterable ({baselineOutcome})");
             }
+        }
+
+        void LogCandidate(QuantitySearch.Candidate c, bool isBest)
+        {
+            if (c.Outcome == QuantitySearch.CandidateOutcome.Infeasible)
+            {
+                MelonLogger.Msg($"AAD:   qty {c.Quantity} → no 100%-accept price, skipped");
+                return;
+            }
+
+            var marker = c.Outcome == QuantitySearch.CandidateOutcome.BelowMinProfit
+                ? "  below min profit, skipped"
+                : isBest ? "  ← best" : "";
+            MelonLogger.Msg($"AAD:   qty {c.Quantity} → ${c.TotalPrice:F0} ({c.UnitPrice:F2}/unit){marker}");
         }
     }
 
