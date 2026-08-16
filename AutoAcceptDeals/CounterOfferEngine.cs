@@ -122,7 +122,7 @@ internal static class CounterOfferEngine
             return false; // CouldNotEvaluate
         }
 
-        LogTrace(r, product, Settings.RoundingMultiple, minUnitPrice, result);
+        LogTrace(r, product, Settings.RoundingMultiple, minUnitPrice, searchCap, result);
 
         var floorCandidate = result.Trace[0];
 
@@ -253,15 +253,23 @@ internal static class CounterOfferEngine
     // BoundedByMaxCandidates pins Found && Truncated both true), so MaxCandidates + 3 lines, not
     // + 2, is the absolute worst case.
     private static void LogTrace(
-        DealRequest r, ProductDefinition product, int multiple, float minUnitPrice, QuantitySearch.Result result)
+        DealRequest r, ProductDefinition product, int multiple, float minUnitPrice, int searchCap,
+        QuantitySearch.Result result)
     {
         if (multiple <= 0 || result.Trace.Count == 0) return;
 
         var name = r.Customer.NPC?.FullName ?? "<unknown>";
         var floorCandidate = result.Trace[0];
+        // searchCap can be narrower than QuantityMath.QuantityCap when DeadZoneAlwaysRejects
+        // holds (see TryPropose) — printing the hard cap here instead would make the dominant
+        // case (searchCap binding, no Truncated warning) look like it stopped for no reason
+        // (PR #14 review, round 10).
+        var capNote = searchCap < QuantityMath.QuantityCap
+            ? $" (dead zone; hard cap {QuantityMath.QuantityCap})"
+            : "";
         MelonLogger.Msg(
             $"AAD: {name} — qty search for {product.ID}: origQty={r.Quantity}, floor={floorCandidate.Quantity}, " +
-            $"step={multiple}, cap={QuantityMath.QuantityCap}, need ≥{minUnitPrice:F2}/unit");
+            $"step={multiple}, cap={searchCap}{capNote}, need ≥{minUnitPrice:F2}/unit");
 
         foreach (var c in result.Trace)
         {

@@ -255,6 +255,9 @@ public class ProbabilityFormulaTests
     {
         const int cap = 1000;
         int first = ProbabilityFormula.FirstDeadZoneQty(origQty, cap);
+        Assert.True(first >= 1); // pins lo's floor: qty == 0 is also a dead-zone qty (tent, not a
+                                  // step), so first - 1 below must stay >= 0 or IsDeadZoneQty sees a
+                                  // negative qty and MathF.Pow yields NaN, silently passing Assert.False
         Assert.True(first <= cap);
         Assert.True(ProbabilityFormula.IsDeadZoneQty(first, origQty));
         Assert.False(ProbabilityFormula.IsDeadZoneQty(first - 1, origQty));

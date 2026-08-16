@@ -106,11 +106,14 @@ internal static class ProbabilityFormula
     }
 
     // Smallest qty in [1, cap] where IsDeadZoneQty holds, or cap+1 if none does. IsDeadZoneQty is
-    // monotone non-decreasing in qty (num5 only decreases past the point it first hits zero), so
-    // bisection is exact. Callers can use this to cap a climb before it ever enters the dead zone,
-    // instead of walking into it one candidate at a time and discovering the boundary the hard way —
-    // it still only ever asks IsDeadZoneQty, never derives the ratio threshold itself (PR #14
-    // review, round 9).
+    // monotone non-decreasing in qty for qty >= 1 (num5 only decreases past the point it first
+    // hits zero), so bisection over that range is exact. qty == 0 is excluded from the claim, not
+    // covered by it: num4 = clamp(num3, 0, 2) is 1 away from 1 at both num3 == 0 (qty == 0) and
+    // num3 >= 2, so IsDeadZoneQty(0, origQty) is also true — a tent, not a step — which is exactly
+    // why lo starts at 1 rather than 0. Callers can use this to cap a climb before it ever enters
+    // the dead zone, instead of walking into it one candidate at a time and discovering the
+    // boundary the hard way — it still only ever asks IsDeadZoneQty, never derives the ratio
+    // threshold itself (PR #14 review, round 9; monotonicity clarified round 10).
     internal static int FirstDeadZoneQty(int origQty, int cap)
     {
         if (!IsDeadZoneQty(cap, origQty)) return cap + 1;
